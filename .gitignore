@@ -7,6 +7,10 @@
 # Recordings
 *.wav
 *.mp3
+recordings/
+
+# Database
+smart_recorder.db
 
 # Claude local settings
 .claude/settings.local.json

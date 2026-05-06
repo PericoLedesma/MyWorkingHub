@@ -1,0 +1,22 @@
+# Virtual environment
+.venv/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
