@@ -4,27 +4,29 @@ import subprocess
 import threading
 import time
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import (
+    QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
+    QSizePolicy, QVBoxLayout, QWidget, QComboBox,
+)
 
 from .agent import ChatAgent
-from .db import delete_metadata, get_transcript, load_metadata, update_tag
+from .db import delete_metadata, get_summary, get_transcript, load_metadata, update_tag
 from .recorder import FOLDER, Recorder
+from .summarizer import Summarizer
 from .transcriber import Transcriber
 
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("blue")
-
-_GREEN        = "#2ecc71"
-_YELLOW       = "#f39c12"
-_RED          = "#e74c3c"
-_ACCENT       = "#2563eb"
-_ACCENT_HOVER = "#1d4ed8"
+_GREEN  = "#2ecc71"
+_YELLOW = "#f39c12"
+_RED    = "#e74c3c"
+_ACCENT = "#2563eb"
 
 _SOURCE_ICON = {"mic": "🎤", "app": "🔊", "both": "🎤+🔊", "unknown": "·"}
 
 
 def _format_name(filepath: str) -> str:
-    """Format a recording filepath into a human-friendly date/time label."""
     name = os.path.basename(filepath)
     try:
         stem = name.replace("recording_", "").replace(".wav", "")
@@ -40,7 +42,6 @@ def _format_name(filepath: str) -> str:
 
 
 def _format_duration(seconds: float) -> str:
-    """Format seconds as '1m 05s' or '42s'."""
     s = int(seconds)
     if s < 60:
         return f"{s}s"
@@ -48,284 +49,440 @@ def _format_duration(seconds: float) -> str:
     return f"{m}m {s:02d}s"
 
 
-class SmartRecorderApp(ctk.CTk):
-    """Main application window: wires together the recorder, transcriber, and chat agent."""
+class LevelBar(QWidget):
+    """Custom VU meter drawn with QPainter."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._value = 0.0
+        self.setFixedSize(180, 8)
+
+    def set_value(self, v: float):
+        self._value = max(0.0, min(1.0, v))
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = self.rect()
+        p.fillRect(r, QColor("#2a2a2a"))
+        if self._value > 0:
+            color = (QColor(_GREEN) if self._value < 0.5
+                     else QColor(_YELLOW) if self._value < 0.75
+                     else QColor(_RED))
+            p.fillRect(0, 0, int(r.width() * self._value), r.height(), color)
+
+
+class SmartRecorderApp(QMainWindow):
+    _sig_recording_done = Signal(object)
+    _sig_transcribed    = Signal(str, object)
+    _sig_summarized     = Signal(str, object)
+    _sig_agent_response = Signal(object)
 
     def __init__(self):
         super().__init__()
-        self.title("Smart Recorder")
-        self.geometry("1280x800")
-        self.resizable(True, True)
-        self.minsize(960, 600)
+        self.setWindowTitle("Smart Recorder")
+        self.resize(1280, 800)
+        self.setMinimumSize(960, 600)
 
         self._recording = False
-        self._stop_event = threading.Event()  # signals recorder thread to stop
+        self._stop_event = threading.Event()
         self._monitor_stop = threading.Event()
         self._mic_level = 0.0
         self._app_level = 0.0
         self._recordings: list[dict] = []
         self._record_start: float | None = None
-        self._transcribing: set[str] = set()  # filepaths currently being transcribed (shows "···")
+        self._transcribing: set[str] = set()
+        self._summarizing: set[str] = set()
+        self._filters: dict = {"project": None}
+        self._mic_on = True
+        self._app_on = False
+        self._chat_history: list[dict] = []
 
-        self._mic_on = ctk.BooleanVar(value=True)
-        self._app_on = ctk.BooleanVar(value=False)
+        # Signals marshal cross-thread callbacks safely onto the Qt main thread
+        self._sig_recording_done.connect(self._on_done)
+        self._sig_transcribed.connect(self._on_transcribed)
+        self._sig_summarized.connect(self._on_summarized)
+        self._sig_agent_response.connect(self._on_agent_response)
 
         self._recorder = Recorder(
             stop_event=self._stop_event,
             set_mic_level=lambda v: setattr(self, "_mic_level", v),
             set_app_level=lambda v: setattr(self, "_app_level", v),
-            on_done=lambda meta: self.after(0, self._on_done, meta),
+            on_done=self._sig_recording_done.emit,
         )
         self._transcriber = Transcriber()
+        self._summarizer = Summarizer()
         self._agent = ChatAgent()
-        self._chat_history: list[dict] = []
-        self._chat_scroll: ctk.CTkScrollableFrame | None = None
-        self._chat_input: ctk.CTkEntry | None = None
-        self._send_btn: ctk.CTkButton | None = None
 
         self._build_ui()
+
+        self._level_timer = QTimer(self)
+        self._level_timer.timeout.connect(self._poll_level)
+        self._level_timer.start(50)
+
+        self._timer_timer = QTimer(self)
+        self._timer_timer.timeout.connect(self._poll_timer)
+        self._timer_timer.start(500)
+
         self._load_existing_recordings()
-        self._poll_level()
-        self._poll_timer()
         self._start_monitor()
 
-    # ── UI ─────────────────────────────────────────────────────────────────
+    # ── UI construction ────────────────────────────────────────────────────
 
     def _build_ui(self):
-        """Construct and lay out all UI widgets."""
-        # ── Top bar ────────────────────────────────────────────────────────
-        top = ctk.CTkFrame(self, fg_color=("gray83", "gray16"), corner_radius=0, height=80)
-        top.pack(side="top", fill="x")
-        top.pack_propagate(False)
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self._build_topbar())
+        root.addWidget(self._hline())
+        root.addWidget(self._build_content(), stretch=1)
 
-        # Section 1: title + status
-        title_sec = ctk.CTkFrame(top, fg_color="transparent")
-        title_sec.pack(side="left", padx=(20, 0), pady=10)
+    def _hline(self):
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background-color: #2a2a2a;")
+        return line
 
-        ctk.CTkLabel(
-            title_sec, text="Smart Recorder",
-            font=ctk.CTkFont(size=17, weight="bold"),
-            anchor="w",
-        ).pack(anchor="w")
+    def _vline(self):
+        line = QFrame()
+        line.setFixedWidth(1)
+        line.setStyleSheet("background-color: #2a2a2a;")
+        return line
 
-        status_row = ctk.CTkFrame(title_sec, fg_color="transparent")
-        status_row.pack(anchor="w")
-        self._status_dot = ctk.CTkLabel(
-            status_row, text="●", font=ctk.CTkFont(size=10),
-            text_color=("gray55", "gray45"),
-        )
-        self._status_dot.pack(side="left")
-        self._status_label = ctk.CTkLabel(
-            status_row, text="Ready",
-            font=ctk.CTkFont(size=11),
-            text_color=("gray45", "gray55"),
-        )
-        self._status_label.pack(side="left", padx=(4, 0))
+    def _vsep(self):
+        """Vertical separator with horizontal padding for the top bar."""
+        sep = QFrame()
+        sep.setFixedSize(1, 56)
+        sep.setStyleSheet("background-color: #2a2a2a;")
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(16, 0, 16, 0)
+        h.addWidget(sep)
+        return w
 
-        # Separator
-        ctk.CTkFrame(top, fg_color=("gray70", "gray28"), width=1).pack(side="left", fill="y", padx=16, pady=12)
+    def _build_topbar(self):
+        bar = QFrame()
+        bar.setFixedHeight(80)
+        bar.setStyleSheet("QFrame { background-color: #161616; }")
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 0, 20, 0)
+        layout.setSpacing(0)
 
-        # Section 2: input sources + level meters (2 rows)
-        sources_sec = ctk.CTkFrame(top, fg_color="transparent")
-        sources_sec.pack(side="left", pady=10)
+        # ── Section 1: title + status ──
+        title_sec = QWidget()
+        tl = QVBoxLayout(title_sec)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.setSpacing(2)
 
-        # Row 1: mic button + mic level
-        mic_row = ctk.CTkFrame(sources_sec, fg_color="transparent")
-        mic_row.pack(anchor="w", pady=(0, 6))
-        self._mic_btn = ctk.CTkButton(
-            mic_row, text="🎤  Microphone",
-            height=28, corner_radius=8, width=130,
-            fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
-            font=ctk.CTkFont(size=12),
-            command=self._toggle_mic_source,
-        )
-        self._mic_btn.pack(side="left", padx=(0, 10))
-        self._mic_meter = ctk.CTkProgressBar(mic_row, height=7, corner_radius=4, progress_color=_GREEN, width=180)
-        self._mic_meter.set(0)
-        self._mic_meter.pack(side="left")
-        self._mic_level_label = ctk.CTkLabel(
-            mic_row, text="0%", font=ctk.CTkFont(size=10), width=30, anchor="e",
-            text_color=("gray50", "gray50"),
-        )
-        self._mic_level_label.pack(side="left", padx=(6, 0))
+        title_lbl = QLabel("Smart Recorder")
+        title_lbl.setStyleSheet("font-size: 17px; font-weight: bold; color: #e0e0e0;")
+        tl.addWidget(title_lbl)
 
-        # Row 2: app audio button + app level
-        app_row = ctk.CTkFrame(sources_sec, fg_color="transparent")
-        app_row.pack(anchor="w")
-        self._app_btn = ctk.CTkButton(
-            app_row, text="🔊  App Audio",
-            height=28, corner_radius=8, width=130,
-            fg_color="transparent", hover_color=("gray74", "gray24"),
-            border_width=1, border_color=("gray65", "gray38"),
-            text_color=("gray40", "gray60"),
-            font=ctk.CTkFont(size=12),
-            command=self._toggle_app_source,
-        )
-        self._app_btn.pack(side="left", padx=(0, 10))
-        self._app_meter = ctk.CTkProgressBar(app_row, height=7, corner_radius=4, progress_color=_GREEN, width=180)
-        self._app_meter.set(0)
-        self._app_meter.pack(side="left")
-        self._app_level_label = ctk.CTkLabel(
-            app_row, text="0%", font=ctk.CTkFont(size=10), width=30, anchor="e",
-            text_color=("gray50", "gray50"),
-        )
-        self._app_level_label.pack(side="left", padx=(6, 0))
+        status_row = QWidget()
+        sl = QHBoxLayout(status_row)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(4)
+        self._status_dot = QLabel("●")
+        self._status_dot.setStyleSheet("font-size: 10px; color: #555;")
+        self._status_label = QLabel("Ready")
+        self._status_label.setStyleSheet("font-size: 11px; color: #666;")
+        sl.addWidget(self._status_dot)
+        sl.addWidget(self._status_label)
+        sl.addStretch()
+        tl.addWidget(status_row)
 
-        # Separator
-        ctk.CTkFrame(top, fg_color=("gray70", "gray28"), width=1).pack(side="left", fill="y", padx=16, pady=12)
+        layout.addWidget(title_sec)
+        layout.addWidget(self._vsep())
 
-        # Section 4: timer + record button
-        rec_sec = ctk.CTkFrame(top, fg_color="transparent")
-        rec_sec.pack(side="left", pady=12)
+        # ── Section 2: input sources + level meters ──
+        sources_sec = QWidget()
+        src_layout = QVBoxLayout(sources_sec)
+        src_layout.setContentsMargins(0, 0, 0, 0)
+        src_layout.setSpacing(6)
 
-        self._timer_label = ctk.CTkLabel(
-            rec_sec, text=" ",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            text_color=_RED,
-        )
-        self._timer_label.pack(anchor="w")
+        mic_row = QWidget()
+        ml = QHBoxLayout(mic_row)
+        ml.setContentsMargins(0, 0, 0, 0)
+        ml.setSpacing(10)
+        self._mic_btn = self._make_source_btn("🎤  Microphone", active=True)
+        self._mic_btn.clicked.connect(self._toggle_mic_source)
+        self._mic_meter = LevelBar()
+        self._mic_level_lbl = QLabel("0%")
+        self._mic_level_lbl.setStyleSheet("font-size: 10px; color: #555; min-width: 30px;")
+        self._mic_level_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        ml.addWidget(self._mic_btn)
+        ml.addWidget(self._mic_meter)
+        ml.addWidget(self._mic_level_lbl)
 
-        self._record_btn = ctk.CTkButton(
-            rec_sec,
-            text="⏺  Record",
-            height=42, corner_radius=21, width=160,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#c0392b", hover_color="#e74c3c",
-            command=self._toggle_recording,
-        )
-        self._record_btn.pack(anchor="w", pady=(4, 0))
+        app_row = QWidget()
+        al = QHBoxLayout(app_row)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.setSpacing(10)
+        self._app_btn = self._make_source_btn("🔊  App Audio", active=False)
+        self._app_btn.clicked.connect(self._toggle_app_source)
+        self._app_meter = LevelBar()
+        self._app_level_lbl = QLabel("0%")
+        self._app_level_lbl.setStyleSheet("font-size: 10px; color: #555; min-width: 30px;")
+        self._app_level_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        al.addWidget(self._app_btn)
+        al.addWidget(self._app_meter)
+        al.addWidget(self._app_level_lbl)
 
-        # ── Horizontal divider ─────────────────────────────────────────────
-        ctk.CTkFrame(self, fg_color=("gray70", "gray24"), height=1).pack(side="top", fill="x")
+        src_layout.addWidget(mic_row)
+        src_layout.addWidget(app_row)
+        layout.addWidget(sources_sec)
+        layout.addWidget(self._vsep())
 
-        # ── Bottom content area ────────────────────────────────────────────
-        content = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
-        content.pack(side="top", fill="both", expand=True)
+        # ── Section 3: timer + record button ──
+        rec_sec = QWidget()
+        rl = QVBoxLayout(rec_sec)
+        rl.setContentsMargins(0, 0, 0, 0)
+        rl.setSpacing(4)
 
-        # ── Right panel ────────────────────────────────────────────────────
-        right = ctk.CTkFrame(content, fg_color="transparent", corner_radius=0)
-        right.pack(side="left", fill="both", expand=True)
+        self._timer_label = QLabel(" ")
+        self._timer_label.setStyleSheet(f"font-size: 13px; font-weight: bold; color: {_RED};")
+        rl.addWidget(self._timer_label)
 
-        # Recordings header
-        rec_hdr = ctk.CTkFrame(right, fg_color="transparent")
-        rec_hdr.pack(fill="x", padx=16, pady=(20, 8))
-        ctk.CTkLabel(
-            rec_hdr, text="RECORDINGS",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color=("gray50", "gray50"),
-        ).pack(side="left")
-        ctk.CTkButton(
-            rec_hdr, text="Open Folder",
-            width=90, height=24,
-            font=ctk.CTkFont(size=11),
-            fg_color="transparent",
-            border_width=1, border_color=("gray65", "gray40"),
-            text_color=("gray40", "gray60"),
-            hover_color=("gray80", "gray25"),
-            command=lambda: subprocess.Popen(["explorer", FOLDER]),
-        ).pack(side="right")
+        self._record_btn = QPushButton("⏺  Record")
+        self._record_btn.setFixedSize(160, 42)
+        self._set_record_btn_style(recording=False)
+        self._record_btn.clicked.connect(self._toggle_recording)
+        rl.addWidget(self._record_btn)
 
-        # Log panel — textbox packed first (bottommost), then header above it
-        self._log_box = ctk.CTkTextbox(
-            right, height=110,
-            font=ctk.CTkFont(size=11, family="Courier New"),
-            state="disabled", corner_radius=8,
-        )
-        self._log_box.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
+        layout.addWidget(rec_sec)
+        layout.addStretch()
+        return bar
 
-        log_hdr = ctk.CTkFrame(right, fg_color="transparent")
-        log_hdr.pack(side="bottom", fill="x", padx=16, pady=(6, 2))
-        ctk.CTkLabel(
-            log_hdr, text="LOG",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color=("gray50", "gray50"),
-        ).pack(side="left")
-        ctk.CTkButton(
-            log_hdr, text="Clear",
-            width=50, height=20,
-            font=ctk.CTkFont(size=10),
-            fg_color="transparent",
-            border_width=1, border_color=("gray65", "gray40"),
-            text_color=("gray40", "gray60"),
-            hover_color=("gray80", "gray25"),
-            command=self._clear_log,
-        ).pack(side="right")
+    def _make_source_btn(self, text: str, active: bool) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setFixedSize(130, 28)
+        self._style_source_btn(btn, active)
+        return btn
 
-        # Recordings list
-        self._list_frame = ctk.CTkScrollableFrame(right, corner_radius=8)
-        self._list_frame.pack(padx=16, pady=(0, 4), fill="both", expand=True)
+    def _style_source_btn(self, btn: QPushButton, active: bool):
+        if active:
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {_ACCENT}; color: white;
+                    border: none; border-radius: 8px;
+                    font-size: 12px; padding: 0 8px;
+                }}
+                QPushButton:hover {{ background: #1d4ed8; }}
+                QPushButton:disabled {{ background: #374151; color: #6b7280; }}
+            """)
+        else:
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: transparent; color: #888;
+                    border: 1px solid #444; border-radius: 8px;
+                    font-size: 12px; padding: 0 8px;
+                }
+                QPushButton:hover { background: #2a2a2a; color: #bbb; }
+                QPushButton:disabled { color: #555; border-color: #333; }
+            """)
 
-        # ── Chat divider ───────────────────────────────────────────────────
-        ctk.CTkFrame(content, fg_color=("gray70", "gray24"), width=1).pack(side="left", fill="y")
+    def _set_record_btn_style(self, recording: bool):
+        if recording:
+            self._record_btn.setStyleSheet("""
+                QPushButton {
+                    background: #1a7a3e; color: white;
+                    border: none; border-radius: 21px;
+                    font-size: 14px; font-weight: bold;
+                }
+                QPushButton:hover { background: #27ae60; }
+            """)
+        else:
+            self._record_btn.setStyleSheet("""
+                QPushButton {
+                    background: #c0392b; color: white;
+                    border: none; border-radius: 21px;
+                    font-size: 14px; font-weight: bold;
+                }
+                QPushButton:hover { background: #e74c3c; }
+            """)
 
-        # ── Chat panel ─────────────────────────────────────────────────────
-        chat = ctk.CTkFrame(content, fg_color=("gray83", "gray16"), corner_radius=0, width=340)
-        chat.pack(side="left", fill="y")
-        chat.pack_propagate(False)
-        self._build_chat_panel(chat)
+    def _build_content(self):
+        content = QWidget()
+        layout = QHBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._build_recordings_panel(), stretch=1)
+        layout.addWidget(self._vline())
+        layout.addWidget(self._build_chat_panel())
+        return content
 
-    def _build_chat_panel(self, parent):
-        """Build the chat panel inside the given parent frame."""
-        ctk.CTkLabel(
-            parent, text="Assistant",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            anchor="w",
-        ).pack(anchor="w", padx=16, pady=(20, 8))
+    def _build_recordings_panel(self):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 16, 16, 12)
+        layout.setSpacing(6)
 
-        self._chat_scroll = ctk.CTkScrollableFrame(
-            parent, corner_radius=8, fg_color=("gray78", "gray18"),
-        )
-        self._chat_scroll.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        # Header
+        hdr = QWidget()
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(0, 0, 0, 0)
+        lbl = QLabel("RECORDINGS")
+        lbl.setStyleSheet("font-size: 10px; font-weight: bold; color: #666;")
+        hl.addWidget(lbl)
+        hl.addStretch()
+        open_btn = QPushButton("Open Folder")
+        open_btn.setFixedSize(90, 24)
+        open_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #888;
+                border: 1px solid #444; border-radius: 4px; font-size: 11px;
+            }
+            QPushButton:hover { color: #bbb; border-color: #666; }
+        """)
+        open_btn.clicked.connect(lambda: subprocess.Popen(["explorer", FOLDER]))
+        hl.addWidget(open_btn)
+        layout.addWidget(hdr)
 
-        input_row = ctk.CTkFrame(parent, fg_color="transparent")
-        input_row.pack(fill="x", padx=12, pady=(0, 14))
-        input_row.columnconfigure(0, weight=1)
+        # Filter bar
+        filter_bar = QWidget()
+        fl = QHBoxLayout(filter_bar)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(6)
+        proj_lbl = QLabel("Project:")
+        proj_lbl.setStyleSheet("font-size: 11px; color: #777;")
+        fl.addWidget(proj_lbl)
+        self._project_combo = QComboBox()
+        self._project_combo.setFixedSize(160, 28)
+        self._project_combo.addItem("All")
+        self._project_combo.currentTextChanged.connect(self._on_project_filter_changed)
+        fl.addWidget(self._project_combo)
+        fl.addStretch()
+        layout.addWidget(filter_bar)
 
-        self._chat_input = ctk.CTkEntry(
-            input_row, placeholder_text="Ask something…",
-            height=36, corner_radius=18,
-            font=ctk.CTkFont(size=12),
-        )
-        self._chat_input.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self._chat_input.bind("<Return>", lambda e: self._send_message())
+        # Scrollable recordings list
+        self._list_inner = QWidget()
+        self._list_inner.setStyleSheet("background: transparent;")
+        self._list_layout = QVBoxLayout(self._list_inner)
+        self._list_layout.setContentsMargins(0, 0, 4, 0)
+        self._list_layout.setSpacing(4)
+        self._list_layout.addStretch()
 
-        self._send_btn = ctk.CTkButton(
-            input_row, text="Send",
-            width=60, height=36, corner_radius=18,
-            fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
-            font=ctk.CTkFont(size=12),
-            command=self._send_message,
-        )
-        self._send_btn.grid(row=0, column=1)
+        self._list_scroll = QScrollArea()
+        self._list_scroll.setWidget(self._list_inner)
+        self._list_scroll.setWidgetResizable(True)
+        self._list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        layout.addWidget(self._list_scroll, stretch=1)
+
+        # Log header
+        log_hdr = QWidget()
+        lhl = QHBoxLayout(log_hdr)
+        lhl.setContentsMargins(0, 0, 0, 0)
+        log_lbl = QLabel("LOG")
+        log_lbl.setStyleSheet("font-size: 10px; font-weight: bold; color: #666;")
+        lhl.addWidget(log_lbl)
+        lhl.addStretch()
+        clear_btn = QPushButton("Clear")
+        clear_btn.setFixedSize(50, 20)
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; color: #888;
+                border: 1px solid #444; border-radius: 4px; font-size: 10px;
+            }
+            QPushButton:hover { color: #bbb; }
+        """)
+        clear_btn.clicked.connect(self._clear_log)
+        lhl.addWidget(clear_btn)
+        layout.addWidget(log_hdr)
+
+        self._log_box = QPlainTextEdit()
+        self._log_box.setReadOnly(True)
+        self._log_box.setFixedHeight(110)
+        self._log_box.setStyleSheet("""
+            QPlainTextEdit {
+                background: #111; color: #9ca3af;
+                font-family: 'Courier New'; font-size: 11px;
+                border: none; border-radius: 6px; padding: 4px;
+            }
+        """)
+        layout.addWidget(self._log_box)
+        return panel
+
+    def _build_chat_panel(self):
+        panel = QFrame()
+        panel.setObjectName("chatPanel")
+        panel.setFixedWidth(340)
+        panel.setStyleSheet("QFrame#chatPanel { background: #141414; }")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 20, 12, 14)
+        layout.setSpacing(8)
+
+        hdr = QLabel("Assistant")
+        hdr.setStyleSheet("font-size: 13px; font-weight: bold; color: #e0e0e0;")
+        layout.addWidget(hdr)
+
+        self._chat_inner = QWidget()
+        self._chat_inner.setStyleSheet("background: transparent;")
+        self._chat_vbox = QVBoxLayout(self._chat_inner)
+        self._chat_vbox.setContentsMargins(4, 4, 4, 4)
+        self._chat_vbox.setSpacing(4)
+        self._chat_vbox.addStretch()
+
+        self._chat_scroll = QScrollArea()
+        self._chat_scroll.setWidget(self._chat_inner)
+        self._chat_scroll.setWidgetResizable(True)
+        self._chat_scroll.setStyleSheet("""
+            QScrollArea { border: none; border-radius: 8px; background: #1e1e1e; }
+        """)
+        layout.addWidget(self._chat_scroll, stretch=1)
+
+        input_row = QWidget()
+        il = QHBoxLayout(input_row)
+        il.setContentsMargins(0, 0, 0, 0)
+        il.setSpacing(6)
+
+        self._chat_input = QLineEdit()
+        self._chat_input.setPlaceholderText("Ask something…")
+        self._chat_input.setFixedHeight(36)
+        self._chat_input.setStyleSheet("""
+            QLineEdit {
+                background: #2d2d2d; color: #e0e0e0;
+                border: none; border-radius: 18px;
+                padding: 0 14px; font-size: 12px;
+            }
+        """)
+        self._chat_input.returnPressed.connect(self._send_message)
+        il.addWidget(self._chat_input, stretch=1)
+
+        self._send_btn = QPushButton("Send")
+        self._send_btn.setFixedSize(60, 36)
+        self._send_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_ACCENT}; color: white;
+                border: none; border-radius: 18px; font-size: 12px;
+            }}
+            QPushButton:hover {{ background: #1d4ed8; }}
+            QPushButton:disabled {{ background: #374151; color: #6b7280; }}
+        """)
+        self._send_btn.clicked.connect(self._send_message)
+        il.addWidget(self._send_btn)
+
+        layout.addWidget(input_row)
+        return panel
 
     # ── Source toggles ─────────────────────────────────────────────────────
 
-    def _apply_source_style(self, btn, active: bool):
-        if active:
-            btn.configure(fg_color=_ACCENT, hover_color=_ACCENT_HOVER,
-                          border_width=0, text_color="white")
-        else:
-            btn.configure(fg_color="transparent", hover_color=("gray74", "gray24"),
-                          border_width=1, border_color=("gray65", "gray38"),
-                          text_color=("gray40", "gray60"))
-
     def _toggle_mic_source(self):
-        self._mic_on.set(not self._mic_on.get())
-        self._apply_source_style(self._mic_btn, self._mic_on.get())
+        self._mic_on = not self._mic_on
+        self._style_source_btn(self._mic_btn, self._mic_on)
 
     def _toggle_app_source(self):
-        self._app_on.set(not self._app_on.get())
-        self._apply_source_style(self._app_btn, self._app_on.get())
+        self._app_on = not self._app_on
+        self._style_source_btn(self._app_btn, self._app_on)
 
     # ── Level monitor ──────────────────────────────────────────────────────
 
     def _start_monitor(self):
         self._monitor_stop.clear()
-        threading.Thread(
-            target=self._recorder.monitor,
-            args=(self._monitor_stop,),
-            daemon=True,
-        ).start()
+        threading.Thread(target=self._recorder.monitor, args=(self._monitor_stop,), daemon=True).start()
 
     def _stop_monitor(self):
         self._monitor_stop.set()
@@ -333,13 +490,12 @@ class SmartRecorderApp(ctk.CTk):
     # ── Recording control ──────────────────────────────────────────────────
 
     def _toggle_recording(self):
-        """Start or stop a recording based on the current state."""
         if self._recording:
             self._stop_event.set()
             return
 
-        mic = self._mic_on.get()
-        app = self._app_on.get()
+        mic = self._mic_on
+        app = self._app_on
         if not mic and not app:
             return
 
@@ -348,16 +504,17 @@ class SmartRecorderApp(ctk.CTk):
         self._recording = True
         self._record_start = time.time()
 
-        self._record_btn.configure(text="⏹  Stop", fg_color="#1a7a3e", hover_color="#27ae60")
-        self._mic_btn.configure(state="disabled")
-        self._app_btn.configure(state="disabled")
-        self._status_dot.configure(text_color=_RED)
-        self._status_label.configure(text="Recording", text_color=_RED)
+        self._record_btn.setText("⏹  Stop")
+        self._set_record_btn_style(recording=True)
+        self._mic_btn.setEnabled(False)
+        self._app_btn.setEnabled(False)
+        self._status_dot.setStyleSheet(f"font-size: 10px; color: {_RED};")
+        self._status_label.setStyleSheet(f"font-size: 11px; color: {_RED};")
+        self._status_label.setText("Recording")
 
         sources = " + ".join(filter(None, ["Mic" if mic else "", "App Audio" if app else ""]))
         self._log(f"Recording started  [{sources}]")
 
-        # dispatch to the correct recorder based on active sources
         target = {
             (True, True):  self._recorder.run_both,
             (True, False): self._recorder.run_mic,
@@ -366,15 +523,16 @@ class SmartRecorderApp(ctk.CTk):
         threading.Thread(target=target, daemon=True).start()
 
     def _on_done(self, meta: dict | None):
-        """Handle recording completion: reset UI state and kick off transcription."""
         self._recording = False
         self._record_start = None
-        self._record_btn.configure(text="⏺  Record", fg_color="#c0392b", hover_color="#e74c3c")
-        self._mic_btn.configure(state="normal")
-        self._app_btn.configure(state="normal")
-        self._status_dot.configure(text_color=("gray55", "gray45"))
-        self._status_label.configure(text="Ready", text_color=("gray45", "gray55"))
-        self._timer_label.configure(text=" ")
+        self._record_btn.setText("⏺  Record")
+        self._set_record_btn_style(recording=False)
+        self._mic_btn.setEnabled(True)
+        self._app_btn.setEnabled(True)
+        self._status_dot.setStyleSheet("font-size: 10px; color: #555;")
+        self._status_label.setStyleSheet("font-size: 11px; color: #666;")
+        self._status_label.setText("Ready")
+        self._timer_label.setText(" ")
         self._start_monitor()
 
         if meta:
@@ -386,14 +544,12 @@ class SmartRecorderApp(ctk.CTk):
             self._log(f"Transcribing…  {os.path.basename(meta['filepath'])}")
             self._transcriber.transcribe_async(
                 meta["filepath"],
-                # after(0) marshals the callback back onto the Tk main thread
-                on_done=lambda fp, text: self.after(0, self._on_transcribed, fp, text),
+                on_done=lambda fp, text: self._sig_transcribed.emit(fp, text),
             )
         else:
             self._log("Recording stopped — no audio captured")
 
     def _on_transcribed(self, filepath: str, text: str | None):
-        """Handle transcription result and refresh the recordings list."""
         self._transcribing.discard(filepath)
         for rec in self._recordings:
             if rec["filepath"] == filepath:
@@ -403,233 +559,325 @@ class SmartRecorderApp(ctk.CTk):
         if text is not None:
             preview = text[:70].replace("\n", " ")
             suffix = "…" if len(text) > 70 else ""
-            self._log(f"Transcript ready  {name}  \"{preview}{suffix}\"")
+            self._log(f'Transcript ready  {name}  "{preview}{suffix}"')
+            self._summarizing.add(filepath)
+            self._log(f"Summarizing…  {name}")
+            self._summarizer.summarize_async(
+                filepath,
+                text,
+                on_done=lambda fp, s: self._sig_summarized.emit(fp, s),
+            )
         else:
             self._log(f"Transcription failed  {name}  (check OPENAI_API_KEY)")
+        self._rebuild_list()
+
+    def _on_summarized(self, filepath: str, summary: str | None):
+        self._summarizing.discard(filepath)
+        for rec in self._recordings:
+            if rec["filepath"] == filepath:
+                rec["has_summary"] = summary is not None
+                break
+        name = os.path.basename(filepath)
+        if summary is not None:
+            self._log(f"Summary ready  {name}")
+        else:
+            self._log(f"Summary failed  {name}  (check DEEPSEEK_API_KEY)")
         self._rebuild_list()
 
     # ── Polling ────────────────────────────────────────────────────────────
 
     def _poll_level(self):
-        """Refresh the VU meters at 20 Hz."""
-        for level, meter, label in (
-            (self._mic_level, self._mic_meter, self._mic_level_label),
-            (self._app_level, self._app_meter, self._app_level_label),
+        for level, meter, lbl in (
+            (self._mic_level, self._mic_meter, self._mic_level_lbl),
+            (self._app_level, self._app_meter, self._app_level_lbl),
         ):
-            meter.set(level)
-            label.configure(text=f"{level * 100:.0f}%")
-            color = _GREEN if level < 0.5 else (_YELLOW if level < 0.75 else _RED)
-            meter.configure(progress_color=color)
-        self.after(50, self._poll_level)
+            meter.set_value(level)
+            lbl.setText(f"{level * 100:.0f}%")
 
     def _poll_timer(self):
-        """Update the recording timer label every 500 ms."""
         if self._recording and self._record_start is not None:
             elapsed = int(time.time() - self._record_start)
             h, rem = divmod(elapsed, 3600)
             m, s = divmod(rem, 60)
             time_str = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
-            self._timer_label.configure(text=f"● {time_str}")
-        self.after(500, self._poll_timer)
+            self._timer_label.setText(f"● {time_str}")
 
     # ── Recordings list ────────────────────────────────────────────────────
 
     def _load_existing_recordings(self):
-        """Load recordings from disk/DB and populate the list."""
         self._recordings = load_metadata(FOLDER)
+        self._refresh_project_combo()
+        self._rebuild_list()
+
+    def _unique_projects(self) -> list[str]:
+        seen: list[str] = []
+        for rec in self._recordings:
+            p = (rec.get("project") or "").strip()
+            if p and p not in seen:
+                seen.append(p)
+        return sorted(seen)
+
+    def _apply_filters(self) -> list[dict]:
+        result = self._recordings
+        proj = self._filters.get("project")
+        if proj:
+            result = [r for r in result if (r.get("project") or "").strip() == proj]
+        return result
+
+    def _refresh_project_combo(self):
+        projects = self._unique_projects()
+        current = self._filters.get("project")
+        if current and current not in projects:
+            self._filters["project"] = None
+            current = None
+        self._project_combo.blockSignals(True)
+        self._project_combo.clear()
+        self._project_combo.addItems(["All"] + projects)
+        self._project_combo.setCurrentText("All" if current is None else current)
+        self._project_combo.blockSignals(False)
+
+    def _on_project_filter_changed(self, value: str):
+        self._filters["project"] = None if value == "All" else value
         self._rebuild_list()
 
     def _rebuild_list(self):
-        """Clear and redraw the recordings list from self._recordings."""
-        for widget in self._list_frame.winfo_children():
-            widget.destroy()
+        records = self._apply_filters()
 
-        if not self._recordings:
-            ctk.CTkLabel(
-                self._list_frame,
-                text="No recordings yet",
-                text_color=("gray55", "gray45"),
-                font=ctk.CTkFont(size=12),
-            ).pack(pady=24)
+        # Remove all rows but keep the trailing stretch
+        while self._list_layout.count() > 1:
+            item = self._list_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+        if not records:
+            msg = "No recordings match the current filter" if self._recordings else "No recordings yet"
+            placeholder = QLabel(msg)
+            placeholder.setAlignment(Qt.AlignCenter)
+            placeholder.setStyleSheet("color: #666; font-size: 12px; padding: 24px;")
+            self._list_layout.insertWidget(0, placeholder)
             return
 
-        self._add_list_header()
-        for rec in self._recordings:
-            self._add_row(rec)
+        for i, rec in enumerate(records):
+            self._list_layout.insertWidget(i, self._make_row(rec))
 
-    def _add_list_header(self):
-        """Add a column-header row above the recordings list."""
-        hdr = ctk.CTkFrame(self._list_frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=2, pady=(2, 0))
-        hdr.columnconfigure(1, weight=1)
-        hdr.columnconfigure(2, minsize=96)
-        hdr.columnconfigure(3, minsize=96)
+    def _make_row(self, rec: dict) -> QFrame:
+        row = QFrame()
+        row.setObjectName("recordingRow")
+        row.setStyleSheet("""
+            QFrame#recordingRow { background: #242424; border-radius: 8px; }
+            QFrame#recordingRow QLabel { background: transparent; }
+            QFrame#recordingRow QWidget { background: transparent; }
+        """)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 6, 6, 6)
+        layout.setSpacing(6)
 
-        cols = [
-            (0, "",           48,  "w",      (8, 0)),
-            (1, "Recording",   0,  "w",      (10, 4)),
-            (2, "Project",     0,  "w",      (2, 4)),
-            (3, "Meeting",     0,  "w",      (2, 4)),
-            (4, "Duration",   68,  "e",      (0, 4)),
-            (5, "Transcript", 36,  "center", (0, 2)),
-            (6, "",           34,  "center", (0, 2)),
-            (7, "",           34,  "center", (0, 6)),
-        ]
-        for col, text, minw, anchor, padx in cols:
-            if minw:
-                hdr.columnconfigure(col, minsize=minw)
-            if text:
-                ctk.CTkLabel(
-                    hdr, text=text,
-                    font=ctk.CTkFont(size=9, weight="bold"),
-                    text_color=("gray50", "gray50"),
-                    anchor=anchor,
-                ).grid(row=0, column=col, sticky="w" if anchor == "w" else "ew",
-                       padx=padx, pady=(0, 2))
+        # Source badge
+        badge = QFrame()
+        badge.setFixedSize(32, 32)
+        badge.setStyleSheet("background: #333; border-radius: 6px;")
+        bl = QHBoxLayout(badge)
+        bl.setContentsMargins(0, 0, 0, 0)
+        icon = QLabel(_SOURCE_ICON.get(rec["source"], "·"))
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setStyleSheet("font-size: 12px; background: transparent;")
+        bl.addWidget(icon)
+        layout.addWidget(badge)
 
-    def _add_row(self, rec: dict):
-        """Append a single recording row with play, transcript, and delete controls."""
-        row = ctk.CTkFrame(self._list_frame, fg_color=("gray85", "gray20"), corner_radius=8)
-        row.pack(fill="x", pady=3, padx=1)
-        row.columnconfigure(1, weight=1)
-        row.columnconfigure(2, minsize=96)
-        row.columnconfigure(3, minsize=96)
+        # Recording name
+        name_lbl = QLabel(_format_name(rec["filepath"]))
+        name_lbl.setStyleSheet("font-size: 12px; color: #e0e0e0;")
+        name_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(name_lbl, stretch=1)
 
-        # col 0: source badge
-        badge = ctk.CTkFrame(row, fg_color=("gray78", "gray28"), corner_radius=6, width=32, height=32)
-        badge.grid(row=0, column=0, padx=(8, 0), pady=8, sticky="w")
-        badge.pack_propagate(False)
-        ctk.CTkLabel(
-            badge, text=_SOURCE_ICON.get(rec["source"], "·"),
-            font=ctk.CTkFont(size=12),
-        ).place(relx=0.5, rely=0.5, anchor="center")
-
-        # col 1: recording name
-        ctk.CTkLabel(
-            row, text=_format_name(rec["filepath"]),
-            anchor="w", font=ctk.CTkFont(size=12),
-        ).grid(row=0, column=1, sticky="ew", padx=(10, 4), pady=8)
-
-        # col 2: project (inline editable)
         filepath = rec["filepath"]
 
-        def _make_tag_saver(field, entry, fp=filepath, r=rec):
-            def _save(_event=None):
-                val = entry.get().strip()
-                r[field] = val
-                update_tag(fp, field, val)
-            return _save
-
-        proj_entry = ctk.CTkEntry(
-            row, placeholder_text="Project…",
-            height=28, corner_radius=6,
-            font=ctk.CTkFont(size=11),
-            fg_color=("gray78", "gray26"), border_width=0,
-        )
+        # Project (inline editable)
+        proj_entry = QLineEdit()
+        proj_entry.setPlaceholderText("Project…")
+        proj_entry.setFixedSize(96, 28)
+        proj_entry.setStyleSheet("""
+            QLineEdit {
+                background: #2d2d2d; color: #e0e0e0;
+                border: none; border-radius: 6px; font-size: 11px; padding: 0 6px;
+            }
+        """)
         if rec.get("project"):
-            proj_entry.insert(0, rec["project"])
-        proj_entry.grid(row=0, column=2, sticky="ew", padx=(2, 4), pady=6)
-        proj_saver = _make_tag_saver("project", proj_entry)
-        proj_entry.bind("<FocusOut>", proj_saver)
-        proj_entry.bind("<Return>", proj_saver)
+            proj_entry.setText(rec["project"])
 
-        # col 3: meeting (inline editable)
-        meet_entry = ctk.CTkEntry(
-            row, placeholder_text="Meeting…",
-            height=28, corner_radius=6,
-            font=ctk.CTkFont(size=11),
-            fg_color=("gray78", "gray26"), border_width=0,
-        )
+        def _save_project(fp=filepath, r=rec, e=proj_entry):
+            val = e.text().strip()
+            r["project"] = val
+            update_tag(fp, "project", val)
+            self._refresh_project_combo()
+            if self._filters.get("project") is not None:
+                self._rebuild_list()
+
+        proj_entry.editingFinished.connect(_save_project)
+        layout.addWidget(proj_entry)
+
+        # Meeting (inline editable)
+        meet_entry = QLineEdit()
+        meet_entry.setPlaceholderText("Meeting…")
+        meet_entry.setFixedSize(96, 28)
+        meet_entry.setStyleSheet("""
+            QLineEdit {
+                background: #2d2d2d; color: #e0e0e0;
+                border: none; border-radius: 6px; font-size: 11px; padding: 0 6px;
+            }
+        """)
         if rec.get("meeting"):
-            meet_entry.insert(0, rec["meeting"])
-        meet_entry.grid(row=0, column=3, sticky="ew", padx=(2, 4), pady=6)
-        meet_saver = _make_tag_saver("meeting", meet_entry)
-        meet_entry.bind("<FocusOut>", meet_saver)
-        meet_entry.bind("<Return>", meet_saver)
+            meet_entry.setText(rec["meeting"])
 
-        # col 4: duration
+        def _save_meeting(fp=filepath, r=rec, e=meet_entry):
+            val = e.text().strip()
+            r["meeting"] = val
+            update_tag(fp, "meeting", val)
+
+        meet_entry.editingFinished.connect(_save_meeting)
+        layout.addWidget(meet_entry)
+
+        # Duration
         dur_str = _format_duration(rec["duration"]) if rec["duration"] > 0 else "—"
-        ctk.CTkLabel(
-            row, text=dur_str,
-            anchor="e", font=ctk.CTkFont(size=11),
-            text_color=("gray50", "gray55"), width=60,
-        ).grid(row=0, column=4, sticky="e", padx=(0, 4), pady=8)
+        dur_lbl = QLabel(dur_str)
+        dur_lbl.setFixedWidth(60)
+        dur_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        dur_lbl.setStyleSheet("font-size: 11px; color: #666;")
+        layout.addWidget(dur_lbl)
 
-        # col 5: transcript icon / spinner
+        # Transcript indicator
         if filepath in self._transcribing:
-            ctk.CTkLabel(
-                row, text="···",
-                font=ctk.CTkFont(size=13),
-                text_color=("gray55", "gray45"), width=32,
-            ).grid(row=0, column=5, padx=(0, 2), pady=8)
+            spin = QLabel("···")
+            spin.setFixedWidth(32)
+            spin.setAlignment(Qt.AlignCenter)
+            spin.setStyleSheet("font-size: 13px; color: #666;")
+            layout.addWidget(spin)
         elif rec.get("has_transcript", False):
-            ctk.CTkButton(
-                row, text="📄", width=30, height=28,
-                fg_color="transparent",
-                text_color=("gray50", "gray55"),
-                hover_color=("gray75", "gray28"),
-                font=ctk.CTkFont(size=14),
-                command=lambda p=filepath: self._view_transcript(p),
-            ).grid(row=0, column=5, padx=(0, 2), pady=6)
+            tx_btn = QPushButton("📄")
+            tx_btn.setFixedSize(30, 28)
+            tx_btn.setStyleSheet("""
+                QPushButton { background: transparent; border: none; font-size: 14px; color: #888; }
+                QPushButton:hover { color: #ccc; }
+            """)
+            tx_btn.clicked.connect(lambda _=False, p=filepath: self._view_transcript(p))
+            layout.addWidget(tx_btn)
         else:
-            ctk.CTkFrame(row, fg_color="transparent", width=32, height=28).grid(
-                row=0, column=5, padx=(0, 2), pady=6)
+            spacer = QWidget()
+            spacer.setFixedSize(32, 28)
+            spacer.setStyleSheet("background: transparent;")
+            layout.addWidget(spacer)
 
-        # col 6: play
-        ctk.CTkButton(
-            row, text="▶", width=30, height=28,
-            command=lambda r=rec: self._play(r["filepath"]),
-        ).grid(row=0, column=6, padx=(0, 2), pady=6)
+        # Summary indicator
+        if filepath in self._summarizing:
+            sum_spin = QLabel("···")
+            sum_spin.setFixedWidth(32)
+            sum_spin.setAlignment(Qt.AlignCenter)
+            sum_spin.setStyleSheet("font-size: 13px; color: #555;")
+            layout.addWidget(sum_spin)
+        elif rec.get("has_summary", False):
+            sum_btn = QPushButton("📝")
+            sum_btn.setFixedSize(30, 28)
+            sum_btn.setStyleSheet("""
+                QPushButton { background: transparent; border: none; font-size: 14px; color: #888; }
+                QPushButton:hover { color: #ccc; }
+            """)
+            sum_btn.clicked.connect(lambda _=False, p=filepath: self._view_summary(p))
+            layout.addWidget(sum_btn)
+        else:
+            sum_spacer = QWidget()
+            sum_spacer.setFixedSize(32, 28)
+            sum_spacer.setStyleSheet("background: transparent;")
+            layout.addWidget(sum_spacer)
 
-        # col 7: delete
-        ctk.CTkButton(
-            row, text="✕", width=28, height=28,
-            fg_color="transparent",
-            text_color=("gray50", "gray55"),
-            hover_color=("gray75", "gray28"),
-            font=ctk.CTkFont(size=12),
-            command=lambda r=rec: self._delete(r),
-        ).grid(row=0, column=7, padx=(0, 6), pady=6)
+        # Play
+        play_btn = QPushButton("▶")
+        play_btn.setFixedSize(30, 28)
+        play_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {_ACCENT}; color: white;
+                border: none; border-radius: 4px; font-size: 11px;
+            }}
+            QPushButton:hover {{ background: #1d4ed8; }}
+        """)
+        play_btn.clicked.connect(lambda _=False, p=filepath: self._play(p))
+        layout.addWidget(play_btn)
+
+        # Delete
+        del_btn = QPushButton("✕")
+        del_btn.setFixedSize(28, 28)
+        del_btn.setStyleSheet("""
+            QPushButton { background: transparent; border: none; font-size: 12px; color: #555; }
+            QPushButton:hover { color: #e74c3c; }
+        """)
+        del_btn.clicked.connect(lambda _=False, r=rec: self._delete(r))
+        layout.addWidget(del_btn)
+
+        return row
 
     # ── Chat ───────────────────────────────────────────────────────────────
 
     def _send_message(self):
-        """Read the chat input, append to history, and send to the agent."""
-        text = self._chat_input.get().strip()
+        text = self._chat_input.text().strip()
         if not text:
             return
-        self._chat_input.delete(0, "end")
+        self._chat_input.clear()
         self._chat_history.append({"role": "user", "content": text})
         self._add_chat_bubble(text, role="user")
-        self._send_btn.configure(state="disabled", text="···")
+        self._send_btn.setEnabled(False)
+        self._send_btn.setText("···")
         self._agent.send_async(
             self._chat_history,
-            lambda t: self.after(0, self._on_agent_response, t),
+            lambda t: self._sig_agent_response.emit(t),
         )
 
     def _add_chat_bubble(self, text: str, role: str):
-        """Append a chat bubble for the given role ('user' or 'assistant')."""
-        bubble_row = ctk.CTkFrame(self._chat_scroll, fg_color="transparent")
-        bubble_row.pack(fill="x", pady=2, padx=4)
+        bubble = QLabel(text)
+        bubble.setWordWrap(True)
+        bubble.setMaximumWidth(220)
+        bubble.setContentsMargins(10, 6, 10, 6)
+
         if role == "user":
-            ctk.CTkLabel(
-                bubble_row, text=text,
-                fg_color=_ACCENT, corner_radius=10,
-                wraplength=220, justify="right", anchor="e",
-                padx=10, pady=6, font=ctk.CTkFont(size=12),
-            ).pack(side="right")
+            bubble.setStyleSheet(f"""
+                QLabel {{
+                    background: {_ACCENT}; color: white;
+                    border-radius: 10px; font-size: 12px;
+                }}
+            """)
+            bubble.setAlignment(Qt.AlignRight)
         else:
-            ctk.CTkLabel(
-                bubble_row, text=text,
-                fg_color=("#d1d5db", "#374151"), corner_radius=10,
-                wraplength=220, justify="left", anchor="w",
-                padx=10, pady=6, font=ctk.CTkFont(size=12),
-            ).pack(side="left")
-        self.after(10, lambda: self._chat_scroll._parent_canvas.yview_moveto(1.0))
+            bubble.setStyleSheet("""
+                QLabel {
+                    background: #374151; color: #e0e0e0;
+                    border-radius: 10px; font-size: 12px;
+                }
+            """)
+            bubble.setAlignment(Qt.AlignLeft)
+
+        row_widget = QWidget()
+        row_widget.setStyleSheet("background: transparent;")
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(0)
+
+        if role == "user":
+            row_layout.addStretch()
+            row_layout.addWidget(bubble)
+        else:
+            row_layout.addWidget(bubble)
+            row_layout.addStretch()
+
+        # Insert before the trailing stretch
+        self._chat_vbox.insertWidget(self._chat_vbox.count() - 1, row_widget)
+
+        QTimer.singleShot(10, lambda: self._chat_scroll.verticalScrollBar().setValue(
+            self._chat_scroll.verticalScrollBar().maximum()
+        ))
 
     def _on_agent_response(self, text: str | None):
-        """Handle the agent's reply and display it as a chat bubble."""
-        self._send_btn.configure(state="normal", text="Send")
+        self._send_btn.setEnabled(True)
+        self._send_btn.setText("Send")
         if text is None:
             text = "Error: could not reach assistant."
         else:
@@ -639,35 +887,26 @@ class SmartRecorderApp(ctk.CTk):
     # ── Actions ────────────────────────────────────────────────────────────
 
     def _log(self, message: str) -> None:
-        """Append a timestamped message to the log box."""
         ts = datetime.datetime.now().strftime("%H:%M:%S")
-        self._log_box.configure(state="normal")
-        self._log_box.insert("end", f"[{ts}]  {message}\n")
-        self._log_box.see("end")
-        self._log_box.configure(state="disabled")
+        self._log_box.appendPlainText(f"[{ts}]  {message}")
 
     def _clear_log(self) -> None:
-        """Clear all entries from the log box."""
-        self._log_box.configure(state="normal")
-        self._log_box.delete("1.0", "end")
-        self._log_box.configure(state="disabled")
+        self._log_box.clear()
 
     def _delete(self, rec: dict):
-        """Delete a recording's WAV file, DB row, and remove it from the list."""
         delete_metadata(rec["filepath"])
         try:
             os.remove(rec["filepath"])
         except OSError as exc:
-            self._log(f"Warning: could not delete file {os.path.basename(rec['filepath'])}: {exc}")
+            self._log(f"Warning: could not delete {os.path.basename(rec['filepath'])}: {exc}")
         self._transcribing.discard(rec["filepath"])
         if rec in self._recordings:
             self._recordings.remove(rec)
         self._log(f"Deleted  {os.path.basename(rec['filepath'])}")
+        self._refresh_project_combo()
         self._rebuild_list()
 
     def _play(self, filepath: str):
-        """Play a WAV file in a background thread using Windows SoundPlayer."""
-        # PlaySync blocks until done; run in a thread so the UI stays responsive
         threading.Thread(
             target=lambda: subprocess.run(
                 ["powershell", "-c",
@@ -678,17 +917,59 @@ class SmartRecorderApp(ctk.CTk):
         ).start()
 
     def _view_transcript(self, filepath: str):
-        """Open a modal window showing the full transcript for a recording."""
-        text = get_transcript(filepath)
-        if text is None:
+        transcript = get_transcript(filepath)
+        if transcript is None:
             return
 
-        win = ctk.CTkToplevel(self)
-        win.title(_format_name(filepath))
-        win.geometry("520x400")
-        win.grab_set()  # modal — blocks interaction with the main window
+        summary = get_summary(filepath)
 
-        textbox = ctk.CTkTextbox(win, wrap="word", font=ctk.CTkFont(size=13))
-        textbox.pack(fill="both", expand=True, padx=16, pady=16)
-        textbox.insert("1.0", text)
-        textbox.configure(state="disabled")
+        dlg = QDialog(self)
+        dlg.setWindowTitle(_format_name(filepath))
+        dlg.resize(520, 560)
+        dlg.setModal(True)
+        dlg.setStyleSheet("QDialog { background: #1a1a1a; }")
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        if summary:
+            sum_lbl = QLabel("SUMMARY")
+            sum_lbl.setStyleSheet("font-size: 10px; font-weight: bold; color: #666;")
+            layout.addWidget(sum_lbl)
+
+            sum_box = QPlainTextEdit(summary)
+            sum_box.setReadOnly(True)
+            sum_box.setFixedHeight(160)
+            sum_box.setStyleSheet("""
+                QPlainTextEdit {
+                    background: #1e2a1e; color: #a3d9a5;
+                    border: none; border-radius: 6px;
+                    font-size: 12px; padding: 8px;
+                }
+            """)
+            layout.addWidget(sum_box)
+
+            sep = QFrame()
+            sep.setFixedHeight(1)
+            sep.setStyleSheet("background-color: #2a2a2a;")
+            layout.addWidget(sep)
+
+        tx_lbl = QLabel("TRANSCRIPT")
+        tx_lbl.setStyleSheet("font-size: 10px; font-weight: bold; color: #666;")
+        layout.addWidget(tx_lbl)
+
+        txt = QPlainTextEdit(transcript)
+        txt.setReadOnly(True)
+        txt.setStyleSheet("""
+            QPlainTextEdit {
+                background: #111; color: #e0e0e0;
+                border: none; border-radius: 6px;
+                font-size: 13px; padding: 8px;
+            }
+        """)
+        layout.addWidget(txt, stretch=1)
+        dlg.exec()
+
+    def _view_summary(self, filepath: str):
+        self._view_transcript(filepath)

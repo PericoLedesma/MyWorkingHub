@@ -12,7 +12,7 @@ def _txt_path(wav_path: str) -> str:
     return os.path.splitext(wav_path)[0] + ".txt"
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 def _init():
@@ -47,7 +47,7 @@ def _init():
                 try:
                     conn.execute(col_def)
                 except sqlite3.OperationalError:
-                    pass  # column already exists
+                    pass
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_start_time ON recordings(start_time)"
             )
@@ -55,6 +55,13 @@ def _init():
                 conn.execute("INSERT INTO schema_version VALUES (?)", (_SCHEMA_VERSION,))
             else:
                 conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
+
+        if db_version < 2:
+            try:
+                conn.execute("ALTER TABLE recordings ADD COLUMN summary TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
 
         # Migrate any existing .txt sidecar files into the DB
         rows = conn.execute(
@@ -103,6 +110,24 @@ def get_transcript(filepath: str) -> str | None:
     return row[0] if row else None
 
 
+def save_summary(filepath: str, text: str) -> None:
+    """Persist the generated summary for a recording."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET summary = ? WHERE filepath = ?",
+            (text, filepath),
+        )
+
+
+def get_summary(filepath: str) -> str | None:
+    """Return the stored summary for a recording, or None if not yet generated."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT summary FROM recordings WHERE filepath = ?", (filepath,)
+        ).fetchone()
+    return row[0] if row else None
+
+
 def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
                   end_time: datetime.datetime, rate: int, channels: int) -> dict:
     """Insert a new recording row and return its metadata as a dict."""
@@ -127,6 +152,7 @@ def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
         "channels": channels,
         "file_size": file_size,
         "has_transcript": False,
+        "has_summary": False,
         "project": "",
         "meeting": "",
     }
@@ -137,17 +163,17 @@ def load_metadata(folder: str) -> list[dict]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT filepath, source, start_time, end_time, duration, sample_rate, channels, file_size, "
-            "(transcript IS NOT NULL) as has_transcript, project, meeting "
+            "(transcript IS NOT NULL) as has_transcript, project, meeting, "
+            "(summary IS NOT NULL) as has_summary "
             "FROM recordings ORDER BY start_time DESC"
         ).fetchall()
 
     orphans = []
-    known = set()  # filepaths already in the DB, used to skip re-import below
+    known = set()
     recs = []
     for row in rows:
-        fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting = row
+        fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, has_summary = row
         if not os.path.exists(fp):
-            # file was deleted outside the app; clean up the DB record
             orphans.append((fp,))
             continue
         recs.append({
@@ -160,6 +186,7 @@ def load_metadata(folder: str) -> list[dict]:
             "channels": channels,
             "file_size": fsize,
             "has_transcript": bool(has_transcript),
+            "has_summary": bool(has_summary),
             "project": project or "",
             "meeting": meeting or "",
         })
