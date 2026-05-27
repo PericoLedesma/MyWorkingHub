@@ -8,8 +8,8 @@ import soundfile as sf
 
 from .db import save_metadata
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DATA_DIR = os.environ.get("SMART_RECORDER_DATA_DIR", _ROOT)
+_DEFAULT_DATA_DIR = r"C:\Users\p.ledesma.jimenez\OneDrive - Accenture\Desktop\MyDB"
+_DATA_DIR = os.environ.get("SMART_RECORDER_DATA_DIR", _DEFAULT_DATA_DIR)
 FOLDER = os.path.join(_DATA_DIR, "recordings")
 os.makedirs(FOLDER, exist_ok=True)
 

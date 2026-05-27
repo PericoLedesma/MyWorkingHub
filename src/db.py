@@ -1,9 +1,13 @@
 import datetime
+import logging
 import os
 import sqlite3
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_DATA_DIR = os.environ.get("SMART_RECORDER_DATA_DIR", _ROOT)
+log = logging.getLogger(__name__)
+
+_DEFAULT_DATA_DIR = r"C:\Users\p.ledesma.jimenez\OneDrive - Accenture\Desktop\MyDB"
+_DATA_DIR = os.environ.get("SMART_RECORDER_DATA_DIR", _DEFAULT_DATA_DIR)
+os.makedirs(_DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(_DATA_DIR, "smart_recorder.db")
 
 
@@ -17,6 +21,7 @@ _SCHEMA_VERSION = 2
 
 def _init():
     """Create the recordings table and migrate any sidecar .txt files into the DB."""
+    log.info("Initializing DB at %s", DB_PATH)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)
@@ -39,6 +44,7 @@ def _init():
         """)
 
         if db_version < 1:
+            log.info("Migrating schema to v1 (transcript/project/meeting columns)")
             for col_def in (
                 "ALTER TABLE recordings ADD COLUMN transcript TEXT",
                 "ALTER TABLE recordings ADD COLUMN project TEXT",
@@ -57,6 +63,7 @@ def _init():
                 conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
 
         if db_version < 2:
+            log.info("Migrating schema to v2 (summary column)")
             try:
                 conn.execute("ALTER TABLE recordings ADD COLUMN summary TEXT")
             except sqlite3.OperationalError:
@@ -67,6 +74,7 @@ def _init():
         rows = conn.execute(
             "SELECT filepath FROM recordings WHERE transcript IS NULL"
         ).fetchall()
+        migrated = 0
         for (fp,) in rows:
             txt = _txt_path(fp)
             if os.path.exists(txt):
@@ -76,6 +84,9 @@ def _init():
                     "UPDATE recordings SET transcript = ? WHERE filepath = ?",
                     (text, fp),
                 )
+                migrated += 1
+        if migrated:
+            log.info("Migrated %d sidecar .txt transcript(s) into DB", migrated)
 
 
 _init()
@@ -85,6 +96,7 @@ def update_tag(filepath: str, field: str, value: str) -> None:
     """Update a single text tag column (project or meeting) for a recording."""
     if field not in ("project", "meeting"):
         raise ValueError(f"Unknown tag field: {field!r}")
+    log.info("update_tag  %s=%r  file=%s", field, value, os.path.basename(filepath))
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             f"UPDATE recordings SET {field} = ? WHERE filepath = ?",
@@ -94,6 +106,7 @@ def update_tag(filepath: str, field: str, value: str) -> None:
 
 def save_transcript(filepath: str, text: str) -> None:
     """Update the transcript column for an existing recording row."""
+    log.info("save_transcript  chars=%d  file=%s", len(text), os.path.basename(filepath))
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             "UPDATE recordings SET transcript = ? WHERE filepath = ?",
@@ -103,6 +116,7 @@ def save_transcript(filepath: str, text: str) -> None:
 
 def get_transcript(filepath: str) -> str | None:
     """Return the transcript text for a recording, or None if not yet transcribed."""
+    log.debug("get_transcript  file=%s", os.path.basename(filepath))
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT transcript FROM recordings WHERE filepath = ?", (filepath,)
@@ -112,6 +126,7 @@ def get_transcript(filepath: str) -> str | None:
 
 def save_summary(filepath: str, text: str) -> None:
     """Persist the generated summary for a recording."""
+    log.info("save_summary  chars=%d  file=%s", len(text), os.path.basename(filepath))
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             "UPDATE recordings SET summary = ? WHERE filepath = ?",
@@ -121,6 +136,7 @@ def save_summary(filepath: str, text: str) -> None:
 
 def get_summary(filepath: str) -> str | None:
     """Return the stored summary for a recording, or None if not yet generated."""
+    log.debug("get_summary  file=%s", os.path.basename(filepath))
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT summary FROM recordings WHERE filepath = ?", (filepath,)
@@ -133,6 +149,10 @@ def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
     """Insert a new recording row and return its metadata as a dict."""
     duration = (end_time - start_time).total_seconds()
     file_size = os.path.getsize(filepath)
+    log.info(
+        "save_metadata  source=%s  duration=%.1fs  file=%s",
+        source, duration, os.path.basename(filepath),
+    )
     with sqlite3.connect(DB_PATH) as conn:
         # INSERT OR IGNORE so re-importing the same file is a no-op
         conn.execute(
@@ -155,11 +175,34 @@ def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
         "has_summary": False,
         "project": "",
         "meeting": "",
+        "file_missing": False,
+        "auto_imported": False,
     }
 
 
+def update_filepath(old_path: str, new_path: str) -> None:
+    """Update the filepath for an existing recording row (e.g. after the file is moved)."""
+    log.info(
+        "update_filepath  %s -> %s",
+        os.path.basename(old_path), os.path.basename(new_path),
+    )
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET filepath = ? WHERE filepath = ?",
+            (new_path, old_path),
+        )
+
+
 def load_metadata(folder: str) -> list[dict]:
-    """Load all recordings from DB, prune orphans, and pick up untracked WAV files."""
+    """Load all recordings from DB, mark missing files, and pick up untracked WAVs.
+
+    When a DB row's filepath no longer exists but a file with the same basename
+    is found in *folder*, the row is reconnected to that new path so transcripts,
+    summaries, and tags are preserved across data-directory moves.
+
+    Rows whose files are missing and cannot be reconnected are returned with
+    ``"file_missing": True`` instead of being silently deleted.
+    """
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
             "SELECT filepath, source, start_time, end_time, duration, sample_rate, channels, file_size, "
@@ -168,14 +211,31 @@ def load_metadata(folder: str) -> list[dict]:
             "FROM recordings ORDER BY start_time DESC"
         ).fetchall()
 
-    orphans = []
-    known = set()
+    log.debug("load_metadata  folder=%s  rows_in_db=%d", folder, len(rows))
+    path_updates: list[tuple[str, str]] = []  # (new_fp, old_fp)
+    known: set[str] = set()
     recs = []
+    missing_count = 0
     for row in rows:
         fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, has_summary = row
+        file_missing = False
         if not os.path.exists(fp):
-            orphans.append((fp,))
-            continue
+            # Search the whole folder tree for a file with the same basename
+            basename = os.path.basename(fp)
+            candidate = None
+            for root, _, files in os.walk(folder):
+                if basename in files:
+                    c = os.path.join(root, basename)
+                    if c not in known:
+                        candidate = c
+                        break
+            if candidate:
+                log.info("reconnect  %s -> %s", basename, candidate)
+                path_updates.append((candidate, fp))
+                fp = candidate
+            else:
+                file_missing = True
+                missing_count += 1
         recs.append({
             "filepath": fp,
             "source": source,
@@ -189,29 +249,78 @@ def load_metadata(folder: str) -> list[dict]:
             "has_summary": bool(has_summary),
             "project": project or "",
             "meeting": meeting or "",
+            "file_missing": file_missing,
+            "auto_imported": False,
         })
-        known.add(fp)
+        if not file_missing:
+            known.add(fp)
 
-    if orphans:
+    if path_updates:
+        log.info("Reconnected %d recording path(s) to new folder", len(path_updates))
         with sqlite3.connect(DB_PATH) as conn:
-            conn.executemany("DELETE FROM recordings WHERE filepath = ?", orphans)
+            conn.executemany(
+                "UPDATE recordings SET filepath = ? WHERE filepath = ?", path_updates
+            )
 
-    # pick up .wav files that exist on disk but have no DB row (e.g. copied manually)
-    for f in sorted(os.listdir(folder)):
-        if not f.endswith(".wav"):
-            continue
-        fp = os.path.join(folder, f)
-        if fp in known:
-            continue
-        mtime = os.path.getmtime(fp)
-        st = datetime.datetime.fromtimestamp(mtime)
-        recs.append({**save_metadata(fp, "unknown", st, st, 0, 0), "has_transcript": False})
+    if missing_count:
+        log.warning(
+            "%d recording(s) have missing audio files — metadata preserved", missing_count
+        )
+
+    # pick up .wav files anywhere in the folder tree that have no DB row
+    untracked = 0
+    for root, _, files in os.walk(folder):
+        for f in sorted(files):
+            if not f.endswith(".wav"):
+                continue
+            fp = os.path.join(root, f)
+            if fp in known:
+                continue
+            mtime = os.path.getmtime(fp)
+            st = datetime.datetime.fromtimestamp(mtime)
+            rec = save_metadata(fp, "unknown", st, st, 0, 0)
+            rec["file_missing"] = False
+            rec["auto_imported"] = True
+            recs.append(rec)
+            known.add(fp)
+            untracked += 1
+    if untracked:
+        log.info("Imported %d untracked WAV file(s) from folder tree", untracked)
 
     recs.sort(key=lambda r: r["start_time"], reverse=True)
+    log.debug("load_metadata  returning %d recording(s)", len(recs))
     return recs
+
+
+def search_transcripts(query: str) -> list[dict]:
+    """Return recordings whose transcript contains query (case-insensitive), with context excerpt."""
+    log.debug("search_transcripts  query=%r", query)
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT filepath, start_time, duration, project, meeting, transcript "
+            "FROM recordings WHERE transcript LIKE ? "
+            "ORDER BY start_time DESC LIMIT 20",
+            (f"%{query}%",),
+        ).fetchall()
+    results = []
+    for fp, st, dur, proj, meet, transcript in rows:
+        idx = transcript.lower().find(query.lower())
+        start = max(0, idx - 80)
+        excerpt = transcript[start : start + 200] if idx >= 0 else transcript[:200]
+        results.append({
+            "filepath": fp,
+            "start_time": st,
+            "duration": dur,
+            "project": proj or "",
+            "meeting": meet or "",
+            "excerpt": excerpt,
+        })
+    log.debug("search_transcripts  query=%r  hits=%d", query, len(results))
+    return results
 
 
 def delete_metadata(filepath: str) -> None:
     """Remove the recording row for the given filepath."""
+    log.info("delete_metadata  file=%s", os.path.basename(filepath))
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM recordings WHERE filepath = ?", (filepath,))

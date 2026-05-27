@@ -52,14 +52,16 @@ Toggle **Microphone** / **App Audio**, click **Record**, click **Stop**. Transcr
 
 ```
 SmartRecorder/
-├── main.py              # Entry point
+├── main.py              # Entry point — dark theme, Fusion style
 ├── src/
 │   ├── app.py           # PySide6 GUI — wires all components
 │   ├── recorder.py      # Audio capture (mic, loopback, mixed)
 │   ├── transcriber.py   # OpenAI Whisper transcription (async)
-│   ├── summarizer.py    # DeepSeek summarization in Spanish (async)
-│   ├── agent.py         # DeepSeek chat assistant (async)
-│   └── db.py            # SQLite metadata layer
+│   ├── db.py            # SQLite metadata layer
+│   └── agents/
+│       ├── base.py               # BaseAgent — tool-calling agentic loop
+│       ├── agent_summarization.py # SummarizationAgent — post-transcription summary
+│       └── agent_orchestrator.py  # ChatAgent — in-app assistant
 ├── recordings/          # WAV output (gitignored)
 ├── smart_recorder.db    # Recording metadata, transcripts, and summaries (gitignored)
 └── .venv/               # Virtual environment (gitignored)
@@ -67,7 +69,15 @@ SmartRecorder/
 
 ## Architecture
 
-- All background work (`Recorder`, `Transcriber`, `Summarizer`, `ChatAgent`) runs on daemon threads.
+- All background work (`Recorder`, `Transcriber`, `SummarizationAgent`, `ChatAgent`) runs on daemon threads.
 - Callbacks are marshalled safely onto the Qt main thread via PySide6 `Signal`/`emit`.
 - Post-recording pipeline: **record → transcribe (Whisper) → summarize (DeepSeek)** — each step triggers the next automatically.
+- Agents inherit from `BaseAgent`, which drives a tool-calling loop against the DeepSeek API. `SummarizationAgent` uses a `guardar_resumen` tool to persist summaries; `ChatAgent` responds in free-text Spanish.
 - The `recordings` SQLite table stores `transcript`, `summary`, `project`, and `meeting` per row. Sidecar `.txt` files from older versions are migrated automatically on first run.
+
+
+## List of ToDo
+- Organizar en notas
+- Participantes y quien habla que
+- Todos mios
+- Notas generales del proyecto
