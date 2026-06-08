@@ -6,9 +6,9 @@ import sqlite3
 log = logging.getLogger(__name__)
 
 _DEFAULT_DATA_DIR = r"C:\Users\p.ledesma.jimenez\OneDrive - Accenture\Desktop\MyDB"
-_DATA_DIR = os.environ.get("SMART_RECORDER_DATA_DIR", _DEFAULT_DATA_DIR)
-os.makedirs(_DATA_DIR, exist_ok=True)
-DB_PATH = os.path.join(_DATA_DIR, "smart_recorder.db")
+DATA_DIR = os.environ.get("SMART_RECORDER_DATA_DIR", _DEFAULT_DATA_DIR)
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "smart_recorder.db")
 
 
 def _txt_path(wav_path: str) -> str:
@@ -211,6 +211,13 @@ def load_metadata(folder: str) -> list[dict]:
             "FROM recordings ORDER BY start_time DESC"
         ).fetchall()
 
+    # Single folder walk — used for both reconnection and untracked-file detection
+    folder_wavs: dict[str, str] = {}  # basename → full path
+    for root, _, files in os.walk(folder):
+        for f in files:
+            if f.endswith(".wav"):
+                folder_wavs[f] = os.path.join(root, f)
+
     log.debug("load_metadata  folder=%s  rows_in_db=%d", folder, len(rows))
     path_updates: list[tuple[str, str]] = []  # (new_fp, old_fp)
     known: set[str] = set()
@@ -220,16 +227,9 @@ def load_metadata(folder: str) -> list[dict]:
         fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, has_summary = row
         file_missing = False
         if not os.path.exists(fp):
-            # Search the whole folder tree for a file with the same basename
             basename = os.path.basename(fp)
-            candidate = None
-            for root, _, files in os.walk(folder):
-                if basename in files:
-                    c = os.path.join(root, basename)
-                    if c not in known:
-                        candidate = c
-                        break
-            if candidate:
+            candidate = folder_wavs.get(basename)
+            if candidate and candidate not in known:
                 log.info("reconnect  %s -> %s", basename, candidate)
                 path_updates.append((candidate, fp))
                 fp = candidate
@@ -267,23 +267,20 @@ def load_metadata(folder: str) -> list[dict]:
             "%d recording(s) have missing audio files — metadata preserved", missing_count
         )
 
-    # pick up .wav files anywhere in the folder tree that have no DB row
+    # Import untracked WAV files using the single walk collected above
     untracked = 0
-    for root, _, files in os.walk(folder):
-        for f in sorted(files):
-            if not f.endswith(".wav"):
-                continue
-            fp = os.path.join(root, f)
-            if fp in known:
-                continue
-            mtime = os.path.getmtime(fp)
-            st = datetime.datetime.fromtimestamp(mtime)
-            rec = save_metadata(fp, "unknown", st, st, 0, 0)
-            rec["file_missing"] = False
-            rec["auto_imported"] = True
-            recs.append(rec)
-            known.add(fp)
-            untracked += 1
+    for basename in sorted(folder_wavs):
+        fp = folder_wavs[basename]
+        if fp in known:
+            continue
+        mtime = os.path.getmtime(fp)
+        st = datetime.datetime.fromtimestamp(mtime)
+        rec = save_metadata(fp, "unknown", st, st, 0, 0)
+        rec["file_missing"] = False
+        rec["auto_imported"] = True
+        recs.append(rec)
+        known.add(fp)
+        untracked += 1
     if untracked:
         log.info("Imported %d untracked WAV file(s) from folder tree", untracked)
 

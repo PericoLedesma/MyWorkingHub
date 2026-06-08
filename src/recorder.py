@@ -6,11 +6,9 @@ import numpy as np
 import pyaudiowpatch as pyaudio
 import soundfile as sf
 
-from .db import save_metadata
+from .db import DATA_DIR, save_metadata
 
-_DEFAULT_DATA_DIR = r"C:\Users\p.ledesma.jimenez\OneDrive - Accenture\Desktop\MyDB"
-_DATA_DIR = os.environ.get("SMART_RECORDER_DATA_DIR", _DEFAULT_DATA_DIR)
-FOLDER = os.path.join(_DATA_DIR, "recordings")
+FOLDER = os.path.join(DATA_DIR, "recordings")
 os.makedirs(FOLDER, exist_ok=True)
 
 MIC_RATE = 44100

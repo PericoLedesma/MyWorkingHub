@@ -1,8 +1,11 @@
+import logging
 import threading
 
 from openai import OpenAI
 
 from . import db
+
+log = logging.getLogger(__name__)
 
 
 class Transcriber:
@@ -34,5 +37,5 @@ class Transcriber:
             db.save_transcript(filepath, text)  # persist before notifying the UI
             on_done(filepath, text)
         except Exception:
-            # catches network errors, missing API key, and file issues
+            log.exception("Transcription failed for %s", filepath)
             on_done(filepath, None)

@@ -1,14 +1,18 @@
 import json
+import logging
 import threading
 
 from openai import OpenAI
 
+log = logging.getLogger(__name__)
+
 
 class BaseAgent:
-    """Tool-calling agent base. Subclasses declare `system_prompt` and `tools`."""
+    """Tool-calling agent base. Subclasses declare `system_prompt`, `tools`, and `model`."""
 
     system_prompt: str = ""
     tools: list = []
+    model: str = "deepseek-chat"
 
     def __init__(self, client: OpenAI):
         self._client = client
@@ -27,7 +31,7 @@ class BaseAgent:
     def _run_loop(self, messages: list[dict], tool_handlers: dict, on_done) -> None:
         try:
             while True:
-                kwargs: dict = {"model": "deepseek-chat", "messages": messages}
+                kwargs: dict = {"model": self.model, "messages": messages}
                 if self.tools:
                     kwargs["tools"] = self.tools
                     kwargs["tool_choice"] = "auto"
@@ -48,7 +52,7 @@ class BaseAgent:
                     if handler:
                         result = handler(**args)
                     else:
-                        result = f"herramienta {name!r} no disponible"
+                        result = f"tool {name!r} not available"
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.id,
@@ -56,4 +60,5 @@ class BaseAgent:
                     })
 
         except Exception:
+            log.exception("Agent loop failed (model=%s)", self.model)
             on_done(None)

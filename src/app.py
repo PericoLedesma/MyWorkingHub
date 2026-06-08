@@ -835,6 +835,94 @@ class SmartRecorderApp(QMainWindow):
         for i, rec in enumerate(records):
             self._list_layout.insertWidget(i, self._make_row(rec))
 
+    # ── Row button factories ──────────────────────────────────────────────
+
+    def _make_t_run_btn(self, filepath: str, file_missing: bool) -> QPushButton:
+        btn = QPushButton("···" if filepath in self._transcribing else "⟳")
+        btn.setFixedSize(26, 22)
+        if filepath in self._transcribing:
+            btn.setEnabled(False)
+            btn.setStyleSheet(
+                "QPushButton { background: #0f1a28; color: #3a5070;"
+                " border: 1px solid #1e3040; border-radius: 4px; font-size: 10px; }"
+            )
+        elif file_missing:
+            btn.setEnabled(False)
+            btn.setToolTip("Audio file not found — cannot transcribe")
+            btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #1e2c38;"
+                " border: 1px solid #151e28; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+            )
+        else:
+            btn.clicked.connect(lambda _=False, p=filepath: self._retranscribe(p))
+            btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #3a5070;"
+                " border: 1px solid #1e3040; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+                " QPushButton:hover { background: #101c2a; color: #60a5fa; }"
+            )
+        return btn
+
+    def _make_t_view_btn(self, filepath: str, has_transcript: bool) -> QPushButton:
+        btn = QPushButton("T")
+        btn.setFixedSize(26, 22)
+        if has_transcript:
+            btn.setStyleSheet(
+                "QPushButton { background: #1a3152; color: #60a5fa;"
+                " border: 1px solid #1e3f80; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+                " QPushButton:hover { background: #1e3f80; }"
+            )
+            btn.clicked.connect(lambda _=False, p=filepath: self._view_transcript(p))
+        else:
+            btn.setEnabled(False)
+            btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #1e2c38;"
+                " border: 1px solid #151e28; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+            )
+        return btn
+
+    def _make_s_run_btn(self, filepath: str, file_missing: bool, has_transcript: bool) -> QPushButton:
+        btn = QPushButton("···" if filepath in self._summarizing else "⟳")
+        btn.setFixedSize(26, 22)
+        if filepath in self._summarizing:
+            btn.setEnabled(False)
+            btn.setStyleSheet(
+                "QPushButton { background: #0a1810; color: #1e4028;"
+                " border: 1px solid #1a3020; border-radius: 4px; font-size: 10px; }"
+            )
+        elif file_missing and not has_transcript:
+            btn.setEnabled(False)
+            btn.setToolTip("Need transcript first — audio file not found")
+            btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #151e18;"
+                " border: 1px solid #101810; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+            )
+        else:
+            btn.clicked.connect(lambda _=False, p=filepath: self._resummarize(p))
+            btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; color: #1e4028;"
+                f" border: 1px solid #1a3020; border-radius: 4px; font-size: 10px; font-weight: 700; }}"
+                f" QPushButton:hover {{ background: #0a1810; color: {_GREEN}; }}"
+            )
+        return btn
+
+    def _make_s_view_btn(self, filepath: str, has_summary: bool) -> QPushButton:
+        btn = QPushButton("S")
+        btn.setFixedSize(26, 22)
+        if has_summary:
+            btn.setStyleSheet(
+                f"QPushButton {{ background: #112218; color: {_GREEN};"
+                f" border: 1px solid #1e3828; border-radius: 4px; font-size: 10px; font-weight: 700; }}"
+                f" QPushButton:hover {{ background: #1e3828; }}"
+            )
+            btn.clicked.connect(lambda _=False, p=filepath: self._view_summary(p))
+        else:
+            btn.setEnabled(False)
+            btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #151e18;"
+                " border: 1px solid #101810; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+            )
+        return btn
+
     def _make_row(self, rec: dict) -> RecordingRow:
         row = RecordingRow()
         row.setFixedHeight(52)
@@ -932,125 +1020,13 @@ class SmartRecorderApp(QMainWindow):
         dur_lbl.setStyleSheet(f"font-size: 11px; color: {_T3}; background: transparent;")
         layout.addWidget(dur_lbl)
 
-        # ── Transcript: run (⟳) + view (T) ───────────────────────────────────
-        if filepath in self._transcribing:
-            t_run = QPushButton("···")
-            t_run.setFixedSize(26, 22)
-            t_run.setEnabled(False)
-            t_run.setStyleSheet("""
-                QPushButton {
-                    background: #0f1a28; color: #3a5070;
-                    border: 1px solid #1e3040; border-radius: 4px;
-                    font-size: 10px;
-                }
-            """)
-        else:
-            t_run = QPushButton("⟳")
-            t_run.setFixedSize(26, 22)
-            if file_missing:
-                t_run.setEnabled(False)
-                t_run.setToolTip("Audio file not found — cannot transcribe")
-                t_run.setStyleSheet("""
-                    QPushButton {
-                        background: transparent; color: #1e2c38;
-                        border: 1px solid #151e28; border-radius: 4px;
-                        font-size: 10px; font-weight: 700;
-                    }
-                """)
-            else:
-                t_run.clicked.connect(lambda _=False, p=filepath: self._retranscribe(p))
-                t_run.setStyleSheet("""
-                    QPushButton {
-                        background: transparent; color: #3a5070;
-                        border: 1px solid #1e3040; border-radius: 4px;
-                        font-size: 10px; font-weight: 700;
-                    }
-                    QPushButton:hover { background: #101c2a; color: #60a5fa; }
-                """)
-        layout.addWidget(t_run)
-
-        t_view = QPushButton("T")
-        t_view.setFixedSize(26, 22)
-        if rec.get("has_transcript", False):
-            t_view.setStyleSheet("""
-                QPushButton {
-                    background: #1a3152; color: #60a5fa;
-                    border: 1px solid #1e3f80; border-radius: 4px;
-                    font-size: 10px; font-weight: 700;
-                }
-                QPushButton:hover { background: #1e3f80; }
-            """)
-            t_view.clicked.connect(lambda _=False, p=filepath: self._view_transcript(p))
-        else:
-            t_view.setEnabled(False)
-            t_view.setStyleSheet("""
-                QPushButton {
-                    background: transparent; color: #1e2c38;
-                    border: 1px solid #151e28; border-radius: 4px;
-                    font-size: 10px; font-weight: 700;
-                }
-            """)
-        layout.addWidget(t_view)
-
-        # ── Summary: run (⟳) + view (S) ───────────────────────────────────
-        if filepath in self._summarizing:
-            s_run = QPushButton("···")
-            s_run.setFixedSize(26, 22)
-            s_run.setEnabled(False)
-            s_run.setStyleSheet(f"""
-                QPushButton {{
-                    background: #0a1810; color: #1e4028;
-                    border: 1px solid #1a3020; border-radius: 4px;
-                    font-size: 10px;
-                }}
-            """)
-        else:
-            s_run = QPushButton("⟳")
-            s_run.setFixedSize(26, 22)
-            if file_missing and not rec.get("has_transcript", False):
-                s_run.setEnabled(False)
-                s_run.setToolTip("Need transcript first — audio file not found")
-                s_run.setStyleSheet(f"""
-                    QPushButton {{
-                        background: transparent; color: #151e18;
-                        border: 1px solid #101810; border-radius: 4px;
-                        font-size: 10px; font-weight: 700;
-                    }}
-                """)
-            else:
-                s_run.clicked.connect(lambda _=False, p=filepath: self._resummarize(p))
-                s_run.setStyleSheet(f"""
-                    QPushButton {{
-                        background: transparent; color: #1e4028;
-                        border: 1px solid #1a3020; border-radius: 4px;
-                        font-size: 10px; font-weight: 700;
-                    }}
-                    QPushButton:hover {{ background: #0a1810; color: {_GREEN}; }}
-                """)
-        layout.addWidget(s_run)
-
-        s_view = QPushButton("S")
-        s_view.setFixedSize(26, 22)
-        if rec.get("has_summary", False):
-            s_view.setStyleSheet(f"""
-                QPushButton {{
-                    background: #112218; color: {_GREEN};
-                    border: 1px solid #1e3828; border-radius: 4px;
-                    font-size: 10px; font-weight: 700;
-                }}
-                QPushButton:hover {{ background: #1e3828; }}
-            """)
-            s_view.clicked.connect(lambda _=False, p=filepath: self._view_summary(p))
-        else:
-            s_view.setEnabled(False)
-            s_view.setStyleSheet(f"""
-                QPushButton {{
-                    background: transparent; color: #151e18;
-                    border: 1px solid #101810; border-radius: 4px;
-                    font-size: 10px; font-weight: 700;
-                }}
-            """)
-        layout.addWidget(s_view)
+        # ── Transcript + Summary: run/view buttons ────────────────────────
+        has_transcript = rec.get("has_transcript", False)
+        has_summary    = rec.get("has_summary", False)
+        layout.addWidget(self._make_t_run_btn(filepath, file_missing))
+        layout.addWidget(self._make_t_view_btn(filepath, has_transcript))
+        layout.addWidget(self._make_s_run_btn(filepath, file_missing, has_transcript))
+        layout.addWidget(self._make_s_view_btn(filepath, has_summary))
 
         # Play
         play_btn = QPushButton("▶")
