@@ -1,41 +1,112 @@
 import logging
+import math
+import os
+import tempfile
 import threading
 
+import scipy.io.wavfile as wav
 from openai import OpenAI
 
 from . import db
 
 log = logging.getLogger(__name__)
 
+MAX_CHUNK_BYTES = 24 * 1024 * 1024
+
+CORRECTION_PROMPT = (
+    "You are a transcription editor. "
+    "You will receive a raw speech-to-text transcript that may contain errors caused by "
+    "poor audio quality, background noise, or similar-sounding words. "
+    "Your task is to correct spelling, grammar, and word substitution errors while "
+    "preserving the original meaning, structure, and language of the transcript exactly. "
+    "Do not add, remove, or paraphrase any information. Return only the corrected text."
+)
+
+
+def _split_wav(path: str) -> list[str]:
+    """Split a WAV file into temp chunks that each fit under MAX_CHUNK_BYTES."""
+    sample_rate, data = wav.read(path)
+    bytes_per_sample = data.dtype.itemsize * (data.shape[1] if data.ndim > 1 else 1)
+    max_samples = MAX_CHUNK_BYTES // bytes_per_sample
+    num_chunks = math.ceil(len(data) / max_samples)
+
+    log.info("File exceeds 24 MB — splitting into %d chunks", num_chunks)
+    chunk_paths = []
+    for i in range(num_chunks):
+        chunk_data = data[i * max_samples : (i + 1) * max_samples]
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        wav.write(tmp.name, sample_rate, chunk_data)
+        tmp.close()
+        chunk_paths.append(tmp.name)
+    return chunk_paths
+
 
 class Transcriber:
-    """Sends WAV files to OpenAI Whisper for transcription."""
+    """Sends WAV files to OpenAI Whisper for transcription, with chunking and LLM correction."""
 
     def __init__(self):
         self._client = OpenAI()  # reads OPENAI_API_KEY from environment
 
-    def transcribe_async(self, filepath: str, on_done) -> None:
+    def transcribe_async(self, recording_id: int, filepath: str, on_done) -> None:
         """Kick off transcription in a background thread.
 
-        Calls on_done(filepath, text) on success or on_done(filepath, None) on failure.
+        Calls on_done(recording_id, text) on success or on_done(recording_id, None) on failure.
         """
         threading.Thread(
             target=self._transcribe,
-            args=(filepath, on_done),
+            args=(recording_id, filepath, on_done),
             daemon=True,
         ).start()
 
-    def _transcribe(self, filepath: str, on_done) -> None:
-        """Call Whisper API, persist the result, and notify on_done."""
+    def _transcribe_file(self, path: str) -> tuple[str, str]:
+        with open(path, "rb") as f:
+            resp = self._client.audio.transcriptions.create(
+                model="whisper-1", file=f, response_format="verbose_json"
+            )
+        return resp.text, resp.language
+
+    def _transcribe_with_chunking(self, filepath: str) -> tuple[str, str]:
+        if os.path.getsize(filepath) <= MAX_CHUNK_BYTES:
+            return self._transcribe_file(filepath)
+
+        if not filepath.lower().endswith(".wav"):
+            raise ValueError("File exceeds 25 MB and is not a WAV — cannot auto-split.")
+
+        chunk_paths = _split_wav(filepath)
         try:
-            with open(filepath, "rb") as f:
-                result = self._client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=f,
-                )
-            text = result.text
-            db.save_transcript(filepath, text)  # persist before notifying the UI
-            on_done(filepath, text)
+            parts = []
+            detected_language = "unknown"
+            for i, chunk_path in enumerate(chunk_paths, 1):
+                log.info("Transcribing chunk %d/%d", i, len(chunk_paths))
+                text, lang = self._transcribe_file(chunk_path)
+                parts.append(text)
+                if i == 1:
+                    detected_language = lang
+            return " ".join(parts), detected_language
+        finally:
+            for chunk_path in chunk_paths:
+                os.unlink(chunk_path)
+
+    def _correct(self, raw_text: str) -> str:
+        response = self._client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": CORRECTION_PROMPT},
+                {"role": "user", "content": raw_text},
+            ],
+        )
+        content = response.choices[0].message.content
+        return content if content is not None else raw_text
+
+    def _transcribe(self, recording_id: int, filepath: str, on_done) -> None:
+        """Transcribe with Whisper (chunked if needed), correct with LLM, persist, and notify."""
+        try:
+            raw, language = self._transcribe_with_chunking(filepath)
+            log.info("Detected language: %s  id=%d", language, recording_id)
+            db.save_language(recording_id, language)
+            text = self._correct(raw)
+            db.save_transcript(recording_id, text)
+            on_done(recording_id, text, language)
         except Exception:
             log.exception("Transcription failed for %s", filepath)
-            on_done(filepath, None)
+            on_done(recording_id, None, "unknown")

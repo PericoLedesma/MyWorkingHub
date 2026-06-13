@@ -8,16 +8,17 @@ import time
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
     QSizePolicy, QVBoxLayout, QWidget, QComboBox,
 )
 
 from .agents.agent_orchestrator import ChatAgent
-from .db import delete_metadata, get_summary, get_transcript, load_metadata, update_filepath, update_tag
+from .db import delete_metadata, get_language, get_summary, get_transcript, get_transcript_x, load_metadata, update_filepath, update_tag
 from .recorder import FOLDER, Recorder
 from .agents.agent_summarization import SummarizationAgent
 from .transcriber import Transcriber
+from .transcriber_x import TranscriberX
 
 # ── Color palette (zinc / Linear aesthetic) ───────────────────────────────────
 _BG     = "#09090b"
@@ -147,10 +148,11 @@ class RecordingRow(QFrame):
 
 
 class SmartRecorderApp(QMainWindow):
-    _sig_recording_done = Signal(object)
-    _sig_transcribed    = Signal(str, object)
-    _sig_summarized     = Signal(str, object)
-    _sig_agent_response = Signal(object)
+    _sig_recording_done  = Signal(object)
+    _sig_transcribed     = Signal(int, object, str)
+    _sig_transcribed_x   = Signal(int, object)
+    _sig_summarized      = Signal(int, object)
+    _sig_agent_response  = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -165,8 +167,9 @@ class SmartRecorderApp(QMainWindow):
         self._app_level = 0.0
         self._recordings: list[dict] = []
         self._record_start: float | None = None
-        self._transcribing: set[str] = set()
-        self._summarizing: set[str] = set()
+        self._transcribing: set[int] = set()
+        self._transcribing_x: set[int] = set()
+        self._summarizing: set[int] = set()
         self._filters: dict = {"project": None}
         self._mic_on = True
         self._app_on = False
@@ -176,6 +179,7 @@ class SmartRecorderApp(QMainWindow):
 
         self._sig_recording_done.connect(self._on_done)
         self._sig_transcribed.connect(self._on_transcribed)
+        self._sig_transcribed_x.connect(self._on_transcribed_x)
         self._sig_summarized.connect(self._on_summarized)
         self._sig_agent_response.connect(self._on_agent_response)
 
@@ -186,6 +190,7 @@ class SmartRecorderApp(QMainWindow):
             on_done=self._sig_recording_done.emit,
         )
         self._transcriber = Transcriber()
+        self._transcriber_x = TranscriberX()
         self._summarizer = SummarizationAgent()
         self._agent = ChatAgent()
 
@@ -693,45 +698,52 @@ class SmartRecorderApp(QMainWindow):
             dur = _format_duration(meta["duration"])
             self._log(f"Saved  {os.path.basename(meta['filepath'])}  ({dur})")
             self._recordings.insert(0, meta)
-            self._transcribing.add(meta["filepath"])
+            self._transcribing.add(meta["id"])
             self._rebuild_list()
             self._log(f"Transcribing…  {os.path.basename(meta['filepath'])}")
             self._transcriber.transcribe_async(
+                meta["id"],
                 meta["filepath"],
-                on_done=lambda fp, text: self._sig_transcribed.emit(fp, text),
+                on_done=lambda rid, text, lang: self._sig_transcribed.emit(rid, text, lang),
             )
         else:
             self._log("Recording stopped — no audio captured")
 
-    def _on_transcribed(self, filepath: str, text: str | None):
-        self._transcribing.discard(filepath)
+    def _on_transcribed(self, rec_id: int, text: str | None, language: str):
+        self._transcribing.discard(rec_id)
+        filepath = None
         for rec in self._recordings:
-            if rec["filepath"] == filepath:
+            if rec["id"] == rec_id:
                 rec["has_transcript"] = text is not None
+                rec["language"] = language
+                filepath = rec["filepath"]
                 break
-        name = os.path.basename(filepath)
+        name = os.path.basename(filepath) if filepath else str(rec_id)
         if text is not None:
             preview = text[:70].replace("\n", " ")
             suffix = "…" if len(text) > 70 else ""
-            self._log(f'Transcript ready  {name}  "{preview}{suffix}"')
-            self._summarizing.add(filepath)
+            self._log(f'Transcript ready  {name}  [{language}]  "{preview}{suffix}"')
+            self._summarizing.add(rec_id)
             self._log(f"Summarizing…  {name}")
             self._summarizer.summarize_async(
-                filepath,
+                rec_id,
                 text,
-                on_done=lambda fp, s: self._sig_summarized.emit(fp, s),
+                language,
+                on_done=lambda rid, s: self._sig_summarized.emit(rid, s),
             )
         else:
             self._log(f"Transcription failed  {name}  (check OPENAI_API_KEY)")
         self._rebuild_list()
 
-    def _on_summarized(self, filepath: str, summary: str | None):
-        self._summarizing.discard(filepath)
+    def _on_summarized(self, rec_id: int, summary: str | None):
+        self._summarizing.discard(rec_id)
+        filepath = None
         for rec in self._recordings:
-            if rec["filepath"] == filepath:
+            if rec["id"] == rec_id:
                 rec["has_summary"] = summary is not None
+                filepath = rec["filepath"]
                 break
-        name = os.path.basename(filepath)
+        name = os.path.basename(filepath) if filepath else str(rec_id)
         if summary is not None:
             self._log(f"Summary ready  {name}")
         else:
@@ -766,16 +778,16 @@ class SmartRecorderApp(QMainWindow):
         self._rebuild_list()
 
     def _scan_db(self):
-        before = {r["filepath"] for r in self._recordings}
+        before = {r["id"] for r in self._recordings}
         self._recordings = load_metadata(FOLDER)
-        after = {r["filepath"] for r in self._recordings}
+        after = {r["id"] for r in self._recordings}
 
-        new_files = after - before
+        new_count = len(after - before)
         missing = sum(1 for r in self._recordings if r.get("file_missing"))
 
         parts = [f"Scan complete  {len(self._recordings)} recording(s)"]
-        if new_files:
-            parts.append(f"+{len(new_files)} new")
+        if new_count:
+            parts.append(f"+{new_count} new")
         if missing:
             parts.append(f"{missing} missing")
         self._log("  ·  ".join(parts))
@@ -837,24 +849,27 @@ class SmartRecorderApp(QMainWindow):
 
     # ── Row button factories ──────────────────────────────────────────────
 
-    def _make_t_run_btn(self, filepath: str, file_missing: bool) -> QPushButton:
-        btn = QPushButton("···" if filepath in self._transcribing else "⟳")
+    def _make_process_btn(self, rec_id: int, filepath: str, file_missing: bool, has_transcript: bool) -> QPushButton:
+        processing = rec_id in self._transcribing or rec_id in self._summarizing
+        btn = QPushButton("···" if processing else "⟳")
         btn.setFixedSize(26, 22)
-        if filepath in self._transcribing:
+        if processing:
             btn.setEnabled(False)
             btn.setStyleSheet(
                 "QPushButton { background: #0f1a28; color: #3a5070;"
                 " border: 1px solid #1e3040; border-radius: 4px; font-size: 10px; }"
             )
-        elif file_missing:
+        elif file_missing and not has_transcript:
             btn.setEnabled(False)
-            btn.setToolTip("Audio file not found — cannot transcribe")
+            btn.setToolTip("Audio file not found — cannot process")
             btn.setStyleSheet(
                 "QPushButton { background: transparent; color: #1e2c38;"
                 " border: 1px solid #151e28; border-radius: 4px; font-size: 10px; font-weight: 700; }"
             )
         else:
-            btn.clicked.connect(lambda _=False, p=filepath: self._retranscribe(p))
+            btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath, fm=file_missing: (
+                self._resummarize(rid, p) if fm else self._retranscribe(rid, p)
+            ))
             btn.setStyleSheet(
                 "QPushButton { background: transparent; color: #3a5070;"
                 " border: 1px solid #1e3040; border-radius: 4px; font-size: 10px; font-weight: 700; }"
@@ -862,7 +877,7 @@ class SmartRecorderApp(QMainWindow):
             )
         return btn
 
-    def _make_t_view_btn(self, filepath: str, has_transcript: bool) -> QPushButton:
+    def _make_t_view_btn(self, rec_id: int, filepath: str, has_transcript: bool) -> QPushButton:
         btn = QPushButton("T")
         btn.setFixedSize(26, 22)
         if has_transcript:
@@ -871,7 +886,7 @@ class SmartRecorderApp(QMainWindow):
                 " border: 1px solid #1e3f80; border-radius: 4px; font-size: 10px; font-weight: 700; }"
                 " QPushButton:hover { background: #1e3f80; }"
             )
-            btn.clicked.connect(lambda _=False, p=filepath: self._view_transcript(p))
+            btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._view_transcript(rid, p))
         else:
             btn.setEnabled(False)
             btn.setStyleSheet(
@@ -880,32 +895,7 @@ class SmartRecorderApp(QMainWindow):
             )
         return btn
 
-    def _make_s_run_btn(self, filepath: str, file_missing: bool, has_transcript: bool) -> QPushButton:
-        btn = QPushButton("···" if filepath in self._summarizing else "⟳")
-        btn.setFixedSize(26, 22)
-        if filepath in self._summarizing:
-            btn.setEnabled(False)
-            btn.setStyleSheet(
-                "QPushButton { background: #0a1810; color: #1e4028;"
-                " border: 1px solid #1a3020; border-radius: 4px; font-size: 10px; }"
-            )
-        elif file_missing and not has_transcript:
-            btn.setEnabled(False)
-            btn.setToolTip("Need transcript first — audio file not found")
-            btn.setStyleSheet(
-                "QPushButton { background: transparent; color: #151e18;"
-                " border: 1px solid #101810; border-radius: 4px; font-size: 10px; font-weight: 700; }"
-            )
-        else:
-            btn.clicked.connect(lambda _=False, p=filepath: self._resummarize(p))
-            btn.setStyleSheet(
-                f"QPushButton {{ background: transparent; color: #1e4028;"
-                f" border: 1px solid #1a3020; border-radius: 4px; font-size: 10px; font-weight: 700; }}"
-                f" QPushButton:hover {{ background: #0a1810; color: {_GREEN}; }}"
-            )
-        return btn
-
-    def _make_s_view_btn(self, filepath: str, has_summary: bool) -> QPushButton:
+    def _make_s_view_btn(self, rec_id: int, filepath: str, has_summary: bool) -> QPushButton:
         btn = QPushButton("S")
         btn.setFixedSize(26, 22)
         if has_summary:
@@ -914,13 +904,47 @@ class SmartRecorderApp(QMainWindow):
                 f" border: 1px solid #1e3828; border-radius: 4px; font-size: 10px; font-weight: 700; }}"
                 f" QPushButton:hover {{ background: #1e3828; }}"
             )
-            btn.clicked.connect(lambda _=False, p=filepath: self._view_summary(p))
+            btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._view_summary(rid, p))
         else:
             btn.setEnabled(False)
             btn.setStyleSheet(
                 "QPushButton { background: transparent; color: #151e18;"
                 " border: 1px solid #101810; border-radius: 4px; font-size: 10px; font-weight: 700; }"
             )
+        return btn
+
+    def _make_tx_btn(self, rec_id: int, filepath: str, file_missing: bool, has_transcript_x: bool) -> QPushButton:
+        processing = rec_id in self._transcribing_x
+        btn = QPushButton("···" if processing else "TX")
+        btn.setFixedSize(30, 22)
+        if processing:
+            btn.setEnabled(False)
+            btn.setStyleSheet(
+                "QPushButton { background: #0f1a28; color: #3a5070;"
+                " border: 1px solid #1e3040; border-radius: 4px; font-size: 10px; }"
+            )
+        elif has_transcript_x:
+            btn.setStyleSheet(
+                "QPushButton { background: #271740; color: #a78bfa;"
+                " border: 1px solid #4c1d95; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+                " QPushButton:hover { background: #3d1a6e; }"
+            )
+            btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._view_transcript_x(rid, p))
+        elif file_missing:
+            btn.setEnabled(False)
+            btn.setToolTip("Audio file not found — cannot run WhisperX")
+            btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #1e1a2e;"
+                " border: 1px solid #151520; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+            )
+        else:
+            btn.setToolTip("Run WhisperX transcription with speaker diarization")
+            btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #4c1d95;"
+                " border: 1px solid #2e1060; border-radius: 4px; font-size: 10px; font-weight: 700; }"
+                " QPushButton:hover { background: #1a0f36; color: #a78bfa; }"
+            )
+            btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._retranscribe_x(rid, p))
         return btn
 
     def _make_row(self, rec: dict) -> RecordingRow:
@@ -930,6 +954,7 @@ class SmartRecorderApp(QMainWindow):
         layout.setContentsMargins(10, 0, 8, 0)
         layout.setSpacing(8)
 
+        rec_id = rec["id"]
         filepath = rec["filepath"]
         source = rec.get("source", "unknown")
         file_missing = rec.get("file_missing", False)
@@ -977,20 +1002,13 @@ class SmartRecorderApp(QMainWindow):
         if rec.get("project"):
             proj_entry.setText(rec["project"])
 
-        def _save_project(fp=filepath, r=rec, e=proj_entry):
+        def _save_project(r=rec, e=proj_entry):
             val = e.text().strip()
             r["project"] = val
-            update_tag(r["filepath"], "project", val)
-            new_fp = self._move_recording(r["filepath"], val)
+            update_tag(r["id"], "project", val)
+            new_fp = self._move_recording(r["id"], r["filepath"], val)
             if new_fp != r["filepath"]:
-                old_fp = r["filepath"]
                 r["filepath"] = new_fp
-                if old_fp in self._transcribing:
-                    self._transcribing.discard(old_fp)
-                    self._transcribing.add(new_fp)
-                if old_fp in self._summarizing:
-                    self._summarizing.discard(old_fp)
-                    self._summarizing.add(new_fp)
             self._refresh_project_combo()
             self._rebuild_list()
 
@@ -1004,10 +1022,10 @@ class SmartRecorderApp(QMainWindow):
         if rec.get("meeting"):
             meet_entry.setText(rec["meeting"])
 
-        def _save_meeting(fp=filepath, r=rec, e=meet_entry):
+        def _save_meeting(r=rec, e=meet_entry):
             val = e.text().strip()
             r["meeting"] = val
-            update_tag(fp, "meeting", val)
+            update_tag(r["id"], "meeting", val)
 
         meet_entry.editingFinished.connect(_save_meeting)
         layout.addWidget(meet_entry)
@@ -1021,12 +1039,25 @@ class SmartRecorderApp(QMainWindow):
         layout.addWidget(dur_lbl)
 
         # ── Transcript + Summary: run/view buttons ────────────────────────
-        has_transcript = rec.get("has_transcript", False)
-        has_summary    = rec.get("has_summary", False)
-        layout.addWidget(self._make_t_run_btn(filepath, file_missing))
-        layout.addWidget(self._make_t_view_btn(filepath, has_transcript))
-        layout.addWidget(self._make_s_run_btn(filepath, file_missing, has_transcript))
-        layout.addWidget(self._make_s_view_btn(filepath, has_summary))
+        has_transcript   = rec.get("has_transcript", False)
+        has_summary      = rec.get("has_summary", False)
+        has_transcript_x = rec.get("has_transcript_x", False)
+        layout.addWidget(self._make_process_btn(rec_id, filepath, file_missing, has_transcript))
+        layout.addWidget(self._make_t_view_btn(rec_id, filepath, has_transcript))
+        layout.addWidget(self._make_tx_btn(rec_id, filepath, file_missing, has_transcript_x))
+        layout.addWidget(self._make_s_view_btn(rec_id, filepath, has_summary))
+
+        # Info
+        info_btn = QPushButton("i")
+        info_btn.setFixedSize(22, 22)
+        info_btn.setToolTip("Recording info")
+        info_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {_T3};"
+            f" border: 1px solid {_BD1}; border-radius: 4px; font-size: 10px; font-style: italic; }}"
+            f" QPushButton:hover {{ color: {_T2}; border-color: {_BD2}; }}"
+        )
+        info_btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._view_info(rid, p))
+        layout.addWidget(info_btn)
 
         # Play
         play_btn = QPushButton("▶")
@@ -1127,7 +1158,7 @@ class SmartRecorderApp(QMainWindow):
 
     # ── Actions ────────────────────────────────────────────────────────────
 
-    def _move_recording(self, old_fp: str, project: str) -> str:
+    def _move_recording(self, rec_id: int, old_fp: str, project: str) -> str:
         """Move the WAV to its project subfolder (or back to root if project cleared).
         Updates the DB filepath and returns the new path (old_fp on failure)."""
         dest_dir = os.path.join(FOLDER, project) if project else FOLDER
@@ -1142,7 +1173,7 @@ class SmartRecorderApp(QMainWindow):
         except OSError as exc:
             self._log(f"Warning: could not move {os.path.basename(old_fp)}: {exc}")
             return old_fp
-        update_filepath(old_fp, new_fp)
+        update_filepath(rec_id, new_fp)
         return new_fp
 
     def _log(self, message: str) -> None:
@@ -1153,7 +1184,7 @@ class SmartRecorderApp(QMainWindow):
         self._log_box.clear()
 
     def _delete(self, rec: dict):
-        delete_metadata(rec["filepath"])
+        delete_metadata(rec["id"])
         if rec.get("file_missing"):
             self._log(f"Removed metadata for missing file  {os.path.basename(rec['filepath'])}")
         else:
@@ -1162,7 +1193,8 @@ class SmartRecorderApp(QMainWindow):
             except OSError as exc:
                 self._log(f"Warning: could not delete {os.path.basename(rec['filepath'])}: {exc}")
             self._log(f"Deleted  {os.path.basename(rec['filepath'])}")
-        self._transcribing.discard(rec["filepath"])
+        self._transcribing.discard(rec["id"])
+        self._transcribing_x.discard(rec["id"])
         if rec in self._recordings:
             self._recordings.remove(rec)
         self._refresh_project_combo()
@@ -1181,12 +1213,12 @@ class SmartRecorderApp(QMainWindow):
             daemon=True,
         ).start()
 
-    def _view_transcript(self, filepath: str):
-        transcript = get_transcript(filepath)
+    def _view_transcript(self, rec_id: int, filepath: str):
+        transcript = get_transcript(rec_id)
         if transcript is None:
             return
 
-        summary = get_summary(filepath)
+        summary = get_summary(rec_id)
 
         dlg = QDialog(self)
         dlg.setWindowTitle(_format_name(filepath))
@@ -1245,34 +1277,131 @@ class SmartRecorderApp(QMainWindow):
         layout.addWidget(txt, stretch=1)
         dlg.exec()
 
-    def _view_summary(self, filepath: str):
-        self._view_transcript(filepath)
+    def _view_summary(self, rec_id: int, filepath: str):
+        self._view_transcript(rec_id, filepath)
 
-    def _retranscribe(self, filepath: str):
-        if filepath in self._transcribing:
+    def _retranscribe(self, rec_id: int, filepath: str):
+        if rec_id in self._transcribing:
             return
         if not os.path.exists(filepath):
             self._log(f"File not found — cannot transcribe  {os.path.basename(filepath)}")
             return
-        self._transcribing.add(filepath)
+        self._transcribing.add(rec_id)
         self._rebuild_list()
         self._log(f"Transcribing…  {os.path.basename(filepath)}")
         self._transcriber.transcribe_async(
+            rec_id,
             filepath,
-            on_done=lambda fp, text: self._sig_transcribed.emit(fp, text),
+            on_done=lambda rid, text, lang: self._sig_transcribed.emit(rid, text, lang),
         )
 
-    def _resummarize(self, filepath: str):
-        if filepath in self._summarizing:
+    def _resummarize(self, rec_id: int, filepath: str):
+        if rec_id in self._summarizing:
             return
-        transcript = get_transcript(filepath)
+        transcript = get_transcript(rec_id)
         if transcript is None:
-            self._retranscribe(filepath)
+            self._retranscribe(rec_id, filepath)
             return
-        self._summarizing.add(filepath)
+        language = get_language(rec_id) or "spanish"
+        self._summarizing.add(rec_id)
         self._rebuild_list()
         self._log(f"Summarizing…  {os.path.basename(filepath)}")
         self._summarizer.summarize_async(
-            filepath, transcript,
-            on_done=lambda fp, s: self._sig_summarized.emit(fp, s),
+            rec_id, transcript, language,
+            on_done=lambda rid, s: self._sig_summarized.emit(rid, s),
         )
+
+    def _retranscribe_x(self, rec_id: int, filepath: str):
+        if rec_id in self._transcribing_x:
+            return
+        if not os.path.exists(filepath):
+            self._log(f"File not found — cannot run WhisperX  {os.path.basename(filepath)}")
+            return
+        self._transcribing_x.add(rec_id)
+        self._rebuild_list()
+        self._log(f"WhisperX transcribing…  {os.path.basename(filepath)}")
+        self._transcriber_x.transcribe_async(
+            rec_id,
+            filepath,
+            on_done=lambda rid, text: self._sig_transcribed_x.emit(rid, text),
+        )
+
+    def _on_transcribed_x(self, rec_id: int, text: str | None):
+        self._transcribing_x.discard(rec_id)
+        filepath = None
+        for rec in self._recordings:
+            if rec["id"] == rec_id:
+                rec["has_transcript_x"] = text is not None
+                filepath = rec["filepath"]
+                break
+        name = os.path.basename(filepath) if filepath else str(rec_id)
+        if text is not None:
+            self._log(f"WhisperX transcript ready  {name}")
+        else:
+            self._log(f"WhisperX failed  {name}  (check HF_TOKEN and that whisperx is installed)")
+        self._rebuild_list()
+
+    def _view_info(self, rec_id: int, filepath: str):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Recording Info")
+        dlg.setFixedSize(440, 118)
+        dlg.setModal(False)
+        dlg.setStyleSheet(f"QDialog {{ background: {_CARD}; }}")
+
+        layout = QFormLayout(dlg)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+        layout.setLabelAlignment(Qt.AlignRight)
+
+        def _key(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setStyleSheet(f"color: {_T3}; font-size: 11px; background: transparent;")
+            return lbl
+
+        def _val(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            lbl.setStyleSheet(f"color: {_T1}; font-size: 12px; background: transparent;")
+            return lbl
+
+        layout.addRow(_key("ID"), _val(f"#{rec_id:04d}"))
+        layout.addRow(_key("File"), _val(os.path.basename(filepath)))
+        layout.addRow(_key("Path"), _val(filepath))
+        dlg.exec()
+
+    def _view_transcript_x(self, rec_id: int, filepath: str):
+        transcript_x = get_transcript_x(rec_id)
+        if transcript_x is None:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"WhisperX — {_format_name(filepath)}")
+        dlg.resize(560, 520)
+        dlg.setModal(True)
+        dlg.setStyleSheet(f"""
+            QDialog {{ background: {_CARD}; }}
+            QWidget {{ background: {_CARD}; color: {_T1}; }}
+        """)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        hdr = QLabel("WHISPERX TRANSCRIPT  ·  SPEAKERS")
+        hdr.setStyleSheet(
+            "font-size: 10px; font-weight: 600; letter-spacing: 1px; "
+            "color: #a78bfa; background: transparent;"
+        )
+        layout.addWidget(hdr)
+
+        txt = QPlainTextEdit(transcript_x)
+        txt.setReadOnly(True)
+        txt.setStyleSheet("""
+            QPlainTextEdit {
+                background: #0f0a1e; color: #e2d9f3;
+                border: 1px solid #2e1a5c; border-radius: 6px;
+                font-size: 13px; padding: 10px;
+            }
+        """)
+        layout.addWidget(txt, stretch=1)
+        dlg.exec()

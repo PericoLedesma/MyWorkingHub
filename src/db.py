@@ -16,7 +16,7 @@ def _txt_path(wav_path: str) -> str:
     return os.path.splitext(wav_path)[0] + ".txt"
 
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 4
 
 
 def _init():
@@ -70,6 +70,22 @@ def _init():
                 pass
             conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
 
+        if db_version < 3:
+            log.info("Migrating schema to v3 (transcript_x column)")
+            try:
+                conn.execute("ALTER TABLE recordings ADD COLUMN transcript_x TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
+
+        if db_version < 4:
+            log.info("Migrating schema to v4 (language column)")
+            try:
+                conn.execute("ALTER TABLE recordings ADD COLUMN language TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
+
         # Migrate any existing .txt sidecar files into the DB
         rows = conn.execute(
             "SELECT filepath FROM recordings WHERE transcript IS NULL"
@@ -92,54 +108,93 @@ def _init():
 _init()
 
 
-def update_tag(filepath: str, field: str, value: str) -> None:
+def update_tag(recording_id: int, field: str, value: str) -> None:
     """Update a single text tag column (project or meeting) for a recording."""
     if field not in ("project", "meeting"):
         raise ValueError(f"Unknown tag field: {field!r}")
-    log.info("update_tag  %s=%r  file=%s", field, value, os.path.basename(filepath))
+    log.info("update_tag  %s=%r  id=%d", field, value, recording_id)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            f"UPDATE recordings SET {field} = ? WHERE filepath = ?",
-            (value or None, filepath),
+            f"UPDATE recordings SET {field} = ? WHERE id = ?",
+            (value or None, recording_id),
         )
 
 
-def save_transcript(filepath: str, text: str) -> None:
+def save_transcript(recording_id: int, text: str) -> None:
     """Update the transcript column for an existing recording row."""
-    log.info("save_transcript  chars=%d  file=%s", len(text), os.path.basename(filepath))
+    log.info("save_transcript  chars=%d  id=%d", len(text), recording_id)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "UPDATE recordings SET transcript = ? WHERE filepath = ?",
-            (text, filepath),
+            "UPDATE recordings SET transcript = ? WHERE id = ?",
+            (text, recording_id),
         )
 
 
-def get_transcript(filepath: str) -> str | None:
+def get_transcript(recording_id: int) -> str | None:
     """Return the transcript text for a recording, or None if not yet transcribed."""
-    log.debug("get_transcript  file=%s", os.path.basename(filepath))
+    log.debug("get_transcript  id=%d", recording_id)
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT transcript FROM recordings WHERE filepath = ?", (filepath,)
+            "SELECT transcript FROM recordings WHERE id = ?", (recording_id,)
         ).fetchone()
     return row[0] if row else None
 
 
-def save_summary(filepath: str, text: str) -> None:
+def save_summary(recording_id: int, text: str) -> None:
     """Persist the generated summary for a recording."""
-    log.info("save_summary  chars=%d  file=%s", len(text), os.path.basename(filepath))
+    log.info("save_summary  chars=%d  id=%d", len(text), recording_id)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "UPDATE recordings SET summary = ? WHERE filepath = ?",
-            (text, filepath),
+            "UPDATE recordings SET summary = ? WHERE id = ?",
+            (text, recording_id),
         )
 
 
-def get_summary(filepath: str) -> str | None:
-    """Return the stored summary for a recording, or None if not yet generated."""
-    log.debug("get_summary  file=%s", os.path.basename(filepath))
+def save_language(recording_id: int, language: str) -> None:
+    """Persist the detected language for a recording."""
+    log.info("save_language  language=%s  id=%d", language, recording_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET language = ? WHERE id = ?",
+            (language, recording_id),
+        )
+
+
+def get_language(recording_id: int) -> str | None:
+    """Return the detected language for a recording, or None if not yet set."""
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
-            "SELECT summary FROM recordings WHERE filepath = ?", (filepath,)
+            "SELECT language FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def save_transcript_x(recording_id: int, text: str) -> None:
+    """Persist the WhisperX diarized transcript for a recording."""
+    log.info("save_transcript_x  chars=%d  id=%d", len(text), recording_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET transcript_x = ? WHERE id = ?",
+            (text, recording_id),
+        )
+
+
+def get_transcript_x(recording_id: int) -> str | None:
+    """Return the WhisperX diarized transcript, or None if not yet generated."""
+    log.debug("get_transcript_x  id=%d", recording_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT transcript_x FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def get_summary(recording_id: int) -> str | None:
+    """Return the stored summary for a recording, or None if not yet generated."""
+    log.debug("get_summary  id=%d", recording_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT summary FROM recordings WHERE id = ?", (recording_id,)
         ).fetchone()
     return row[0] if row else None
 
@@ -155,14 +210,21 @@ def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
     )
     with sqlite3.connect(DB_PATH) as conn:
         # INSERT OR IGNORE so re-importing the same file is a no-op
-        conn.execute(
+        cur = conn.execute(
             "INSERT OR IGNORE INTO recordings "
             "(filepath, source, start_time, end_time, duration, sample_rate, channels, file_size) "
             "VALUES (?,?,?,?,?,?,?,?)",
             (filepath, source, start_time.isoformat(), end_time.isoformat(),
              duration, rate, channels, file_size),
         )
+        if cur.lastrowid:
+            row_id = cur.lastrowid
+        else:
+            row_id = conn.execute(
+                "SELECT id FROM recordings WHERE filepath = ?", (filepath,)
+            ).fetchone()[0]
     return {
+        "id": row_id,
         "filepath": filepath,
         "source": source,
         "start_time": start_time,
@@ -173,23 +235,22 @@ def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
         "file_size": file_size,
         "has_transcript": False,
         "has_summary": False,
+        "has_transcript_x": False,
         "project": "",
         "meeting": "",
+        "language": "",
         "file_missing": False,
         "auto_imported": False,
     }
 
 
-def update_filepath(old_path: str, new_path: str) -> None:
+def update_filepath(recording_id: int, new_path: str) -> None:
     """Update the filepath for an existing recording row (e.g. after the file is moved)."""
-    log.info(
-        "update_filepath  %s -> %s",
-        os.path.basename(old_path), os.path.basename(new_path),
-    )
+    log.info("update_filepath  id=%d -> %s", recording_id, os.path.basename(new_path))
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "UPDATE recordings SET filepath = ? WHERE filepath = ?",
-            (new_path, old_path),
+            "UPDATE recordings SET filepath = ? WHERE id = ?",
+            (new_path, recording_id),
         )
 
 
@@ -205,9 +266,11 @@ def load_metadata(folder: str) -> list[dict]:
     """
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
-            "SELECT filepath, source, start_time, end_time, duration, sample_rate, channels, file_size, "
+            "SELECT id, filepath, source, start_time, end_time, duration, sample_rate, channels, file_size, "
             "(transcript IS NOT NULL) as has_transcript, project, meeting, "
-            "(summary IS NOT NULL) as has_summary "
+            "(summary IS NOT NULL) as has_summary, "
+            "(transcript_x IS NOT NULL) as has_transcript_x, "
+            "language "
             "FROM recordings ORDER BY start_time DESC"
         ).fetchall()
 
@@ -219,24 +282,25 @@ def load_metadata(folder: str) -> list[dict]:
                 folder_wavs[f] = os.path.join(root, f)
 
     log.debug("load_metadata  folder=%s  rows_in_db=%d", folder, len(rows))
-    path_updates: list[tuple[str, str]] = []  # (new_fp, old_fp)
+    path_updates: list[tuple[str, int]] = []  # (new_fp, row_id)
     known: set[str] = set()
     recs = []
     missing_count = 0
     for row in rows:
-        fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, has_summary = row
+        row_id, fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, has_summary, has_transcript_x, language = row
         file_missing = False
         if not os.path.exists(fp):
             basename = os.path.basename(fp)
             candidate = folder_wavs.get(basename)
             if candidate and candidate not in known:
                 log.info("reconnect  %s -> %s", basename, candidate)
-                path_updates.append((candidate, fp))
+                path_updates.append((candidate, row_id))
                 fp = candidate
             else:
                 file_missing = True
                 missing_count += 1
         recs.append({
+            "id": row_id,
             "filepath": fp,
             "source": source,
             "start_time": datetime.datetime.fromisoformat(st),
@@ -247,8 +311,10 @@ def load_metadata(folder: str) -> list[dict]:
             "file_size": fsize,
             "has_transcript": bool(has_transcript),
             "has_summary": bool(has_summary),
+            "has_transcript_x": bool(has_transcript_x),
             "project": project or "",
             "meeting": meeting or "",
+            "language": language or "",
             "file_missing": file_missing,
             "auto_imported": False,
         })
@@ -259,7 +325,7 @@ def load_metadata(folder: str) -> list[dict]:
         log.info("Reconnected %d recording path(s) to new folder", len(path_updates))
         with sqlite3.connect(DB_PATH) as conn:
             conn.executemany(
-                "UPDATE recordings SET filepath = ? WHERE filepath = ?", path_updates
+                "UPDATE recordings SET filepath = ? WHERE id = ?", path_updates
             )
 
     if missing_count:
@@ -316,8 +382,8 @@ def search_transcripts(query: str) -> list[dict]:
     return results
 
 
-def delete_metadata(filepath: str) -> None:
-    """Remove the recording row for the given filepath."""
-    log.info("delete_metadata  file=%s", os.path.basename(filepath))
+def delete_metadata(recording_id: int) -> None:
+    """Remove the recording row for the given id."""
+    log.info("delete_metadata  id=%d", recording_id)
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("DELETE FROM recordings WHERE filepath = ?", (filepath,))
+        conn.execute("DELETE FROM recordings WHERE id = ?", (recording_id,))

@@ -2,4 +2,6 @@ PySide6
 numpy
 pyaudiowpatch
 soundfile
+scipy
 openai
+whisperx
