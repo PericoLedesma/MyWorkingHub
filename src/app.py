@@ -10,11 +10,11 @@ from PySide6.QtGui import QBrush, QColor, QPainter
 from PySide6.QtWidgets import (
     QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget, QComboBox,
+    QSizePolicy, QTextEdit, QVBoxLayout, QWidget, QComboBox,
 )
 
 from .agents.agent_orchestrator import ChatAgent
-from .db import delete_metadata, get_language, get_summary, get_transcript, get_transcript_x, load_metadata, update_filepath, update_tag
+from .db import delete_metadata, get_language, get_summary, get_transcript, get_transcript_raw, get_transcript_x, load_metadata, update_filepath, update_tag
 from .recorder import FOLDER, Recorder
 from .agents.agent_summarization import SummarizationAgent
 from .transcriber import Transcriber
@@ -913,38 +913,49 @@ class SmartRecorderApp(QMainWindow):
             )
         return btn
 
-    def _make_tx_btn(self, rec_id: int, filepath: str, file_missing: bool, has_transcript_x: bool) -> QPushButton:
+    def _make_tx_process_btn(self, rec_id: int, filepath: str, file_missing: bool, has_transcript_x: bool) -> QPushButton:
         processing = rec_id in self._transcribing_x
-        btn = QPushButton("···" if processing else "TX")
+        btn = QPushButton("···" if processing else "⟳X")
         btn.setFixedSize(30, 22)
         if processing:
             btn.setEnabled(False)
             btn.setStyleSheet(
                 "QPushButton { background: #0f1a28; color: #3a5070;"
-                " border: 1px solid #1e3040; border-radius: 4px; font-size: 10px; }"
+                " border: 1px solid #1e3040; border-radius: 4px; font-size: 9px; }"
             )
-        elif has_transcript_x:
+        elif file_missing and not has_transcript_x:
+            btn.setEnabled(False)
+            btn.setToolTip("Audio file not found — cannot run WhisperX")
+            btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #1e1a2e;"
+                " border: 1px solid #151520; border-radius: 4px; font-size: 9px; font-weight: 700; }"
+            )
+        else:
+            btn.setToolTip("Run WhisperX transcription with speaker diarization")
+            btn.setStyleSheet(
+                "QPushButton { background: transparent; color: #4c1d95;"
+                " border: 1px solid #2e1060; border-radius: 4px; font-size: 9px; font-weight: 700; }"
+                " QPushButton:hover { background: #1a0f36; color: #a78bfa; }"
+            )
+            btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._retranscribe_x(rid, p))
+        return btn
+
+    def _make_tx_view_btn(self, rec_id: int, filepath: str, has_transcript_x: bool) -> QPushButton:
+        btn = QPushButton("TX")
+        btn.setFixedSize(30, 22)
+        if has_transcript_x:
             btn.setStyleSheet(
                 "QPushButton { background: #271740; color: #a78bfa;"
                 " border: 1px solid #4c1d95; border-radius: 4px; font-size: 10px; font-weight: 700; }"
                 " QPushButton:hover { background: #3d1a6e; }"
             )
             btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._view_transcript_x(rid, p))
-        elif file_missing:
+        else:
             btn.setEnabled(False)
-            btn.setToolTip("Audio file not found — cannot run WhisperX")
             btn.setStyleSheet(
                 "QPushButton { background: transparent; color: #1e1a2e;"
                 " border: 1px solid #151520; border-radius: 4px; font-size: 10px; font-weight: 700; }"
             )
-        else:
-            btn.setToolTip("Run WhisperX transcription with speaker diarization")
-            btn.setStyleSheet(
-                "QPushButton { background: transparent; color: #4c1d95;"
-                " border: 1px solid #2e1060; border-radius: 4px; font-size: 10px; font-weight: 700; }"
-                " QPushButton:hover { background: #1a0f36; color: #a78bfa; }"
-            )
-            btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._retranscribe_x(rid, p))
         return btn
 
     def _make_row(self, rec: dict) -> RecordingRow:
@@ -1044,7 +1055,8 @@ class SmartRecorderApp(QMainWindow):
         has_transcript_x = rec.get("has_transcript_x", False)
         layout.addWidget(self._make_process_btn(rec_id, filepath, file_missing, has_transcript))
         layout.addWidget(self._make_t_view_btn(rec_id, filepath, has_transcript))
-        layout.addWidget(self._make_tx_btn(rec_id, filepath, file_missing, has_transcript_x))
+        layout.addWidget(self._make_tx_process_btn(rec_id, filepath, file_missing, has_transcript_x))
+        layout.addWidget(self._make_tx_view_btn(rec_id, filepath, has_transcript_x))
         layout.addWidget(self._make_s_view_btn(rec_id, filepath, has_summary))
 
         # Info
@@ -1213,16 +1225,39 @@ class SmartRecorderApp(QMainWindow):
             daemon=True,
         ).start()
 
+    @staticmethod
+    def _summary_to_html(text: str) -> str:
+        sections = [s.strip() for s in text.split("\n\n") if s.strip()]
+        parts = [
+            "<body style='margin:0; padding:0; font-family: sans-serif; font-size: 13px;'>"
+        ]
+        for section in sections:
+            lines = section.splitlines()
+            header = lines[0].strip()
+            bullets = [l.strip() for l in lines[1:] if l.strip()]
+            parts.append(
+                f"<p style='margin: 0 0 2px 0; font-size: 10px; font-weight: 700; "
+                f"letter-spacing: 1px; color: #34d399;'>{header}</p>"
+            )
+            for b in bullets:
+                parts.append(
+                    f"<p style='margin: 0 0 1px 8px; color: #d1fae5;'>{b}</p>"
+                )
+            parts.append("<p style='margin: 6px 0;'></p>")
+        parts.append("</body>")
+        return "".join(parts)
+
     def _view_transcript(self, rec_id: int, filepath: str):
         transcript = get_transcript(rec_id)
         if transcript is None:
             return
 
+        transcript_raw = get_transcript_raw(rec_id)
         summary = get_summary(rec_id)
 
         dlg = QDialog(self)
         dlg.setWindowTitle(_format_name(filepath))
-        dlg.resize(540, 580)
+        dlg.resize(1000, 620)
         dlg.setModal(True)
         dlg.setStyleSheet(f"""
             QDialog {{ background: {_CARD}; }}
@@ -1241,14 +1276,15 @@ class SmartRecorderApp(QMainWindow):
             )
             layout.addWidget(sum_lbl)
 
-            sum_box = QPlainTextEdit(summary)
+            sum_box = QTextEdit()
             sum_box.setReadOnly(True)
-            sum_box.setFixedHeight(160)
+            sum_box.setFixedHeight(200)
+            sum_box.setHtml(self._summary_to_html(summary))
             sum_box.setStyleSheet(f"""
-                QPlainTextEdit {{
-                    background: #0f1f14; color: {_GREEN};
+                QTextEdit {{
+                    background: #0f1f14;
                     border: 1px solid #1e3828; border-radius: 6px;
-                    font-size: 12px; padding: 8px;
+                    padding: 8px;
                 }}
             """)
             layout.addWidget(sum_box)
@@ -1258,23 +1294,47 @@ class SmartRecorderApp(QMainWindow):
             sep.setStyleSheet(f"background-color: {_BD1};")
             layout.addWidget(sep)
 
-        tx_lbl = QLabel("TRANSCRIPT")
-        tx_lbl.setStyleSheet(
-            f"font-size: 10px; font-weight: 600; letter-spacing: 1px; "
-            f"color: {_T3}; background: transparent;"
-        )
-        layout.addWidget(tx_lbl)
-
-        txt = QPlainTextEdit(transcript)
-        txt.setReadOnly(True)
-        txt.setStyleSheet(f"""
+        _tx_box_style = f"""
             QPlainTextEdit {{
                 background: {_BG}; color: {_T1};
                 border: 1px solid {_BD1}; border-radius: 6px;
                 font-size: 13px; padding: 10px;
             }}
-        """)
-        layout.addWidget(txt, stretch=1)
+        """
+        _lbl_style = (
+            f"font-size: 10px; font-weight: 600; letter-spacing: 1px; "
+            f"color: {_T3}; background: transparent;"
+        )
+
+        panels_layout = QHBoxLayout()
+        panels_layout.setSpacing(12)
+
+        raw_col = QVBoxLayout()
+        raw_col.setSpacing(4)
+        raw_lbl = QLabel("RAW")
+        raw_lbl.setStyleSheet(_lbl_style)
+        raw_col.addWidget(raw_lbl)
+        raw_box = QPlainTextEdit(
+            transcript_raw if transcript_raw
+            else "(not available — recorded before raw transcript was saved)"
+        )
+        raw_box.setReadOnly(True)
+        raw_box.setStyleSheet(_tx_box_style)
+        raw_col.addWidget(raw_box, stretch=1)
+        panels_layout.addLayout(raw_col, stretch=1)
+
+        corr_col = QVBoxLayout()
+        corr_col.setSpacing(4)
+        corr_lbl = QLabel("CORRECTED")
+        corr_lbl.setStyleSheet(_lbl_style)
+        corr_col.addWidget(corr_lbl)
+        corr_box = QPlainTextEdit(transcript)
+        corr_box.setReadOnly(True)
+        corr_box.setStyleSheet(_tx_box_style)
+        corr_col.addWidget(corr_box, stretch=1)
+        panels_layout.addLayout(corr_col, stretch=1)
+
+        layout.addLayout(panels_layout, stretch=1)
         dlg.exec()
 
     def _view_summary(self, rec_id: int, filepath: str):

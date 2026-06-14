@@ -69,7 +69,7 @@ class TranscriberX:
 
             if hf_token:
                 log.info("WhisperX diarizing  file=%s", os.path.basename(filepath))
-                diarize_model = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=device)
+                diarize_model = whisperx.diarize.DiarizationPipeline(use_auth_token=hf_token, device=device)
                 diarize_segments = diarize_model(audio)
                 result = whisperx.assign_word_speakers(diarize_segments, result)
             else:

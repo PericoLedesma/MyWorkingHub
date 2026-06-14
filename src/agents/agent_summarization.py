@@ -10,15 +10,27 @@ def _build_system_prompt(language: str) -> str:
     if language == "english":
         return (
             "You are a meeting assistant. Analyze the transcript and call `guardar_resumen` "
-            "with a concise summary in English that includes: "
-            "key topics discussed, decisions made, and action points. "
-            "Use bullet points starting with '•'. Plain text only, no markdown headers."
+            "with a structured summary in English using exactly this format — "
+            "three ALL-CAPS section headers, each followed by bullet points starting with '•', "
+            "sections separated by a blank line. Plain text only, no markdown.\n\n"
+            "KEY TOPICS\n"
+            "• ...\n\n"
+            "DECISIONS\n"
+            "• ...\n\n"
+            "ACTION ITEMS\n"
+            "• ..."
         )
     return (
         "Eres un asistente de reuniones. Analiza el transcripto y llama a `guardar_resumen` "
-        "con un resumen conciso en español que incluya: "
-        "temas clave discutidos, decisiones tomadas y puntos de acción. "
-        "Usa viñetas que empiecen con '•'. Solo texto plano, sin encabezados markdown."
+        "con un resumen estructurado en español usando exactamente este formato — "
+        "tres encabezados en MAYÚSCULAS, cada uno seguido de viñetas que empiecen con '•', "
+        "secciones separadas por una línea en blanco. Solo texto plano, sin markdown.\n\n"
+        "TEMAS CLAVE\n"
+        "• ...\n\n"
+        "DECISIONES\n"
+        "• ...\n\n"
+        "PUNTOS DE ACCIÓN\n"
+        "• ..."
     )
 
 _TOOLS = [
@@ -26,13 +38,13 @@ _TOOLS = [
         "type": "function",
         "function": {
             "name": "guardar_resumen",
-            "description": "Guarda el resumen generado de la grabación.",
+            "description": "Guarda el resumen estructurado de la grabación.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "resumen": {
                         "type": "string",
-                        "description": "Resumen con viñetas.",
+                        "description": "Resumen con secciones en mayúsculas y viñetas.",
                     },
                 },
                 "required": ["resumen"],

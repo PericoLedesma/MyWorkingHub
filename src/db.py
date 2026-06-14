@@ -16,7 +16,7 @@ def _txt_path(wav_path: str) -> str:
     return os.path.splitext(wav_path)[0] + ".txt"
 
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 
 def _init():
@@ -86,6 +86,14 @@ def _init():
                 pass
             conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
 
+        if db_version < 5:
+            log.info("Migrating schema to v5 (transcript_raw column)")
+            try:
+                conn.execute("ALTER TABLE recordings ADD COLUMN transcript_raw TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
+
         # Migrate any existing .txt sidecar files into the DB
         rows = conn.execute(
             "SELECT filepath FROM recordings WHERE transcript IS NULL"
@@ -136,6 +144,26 @@ def get_transcript(recording_id: int) -> str | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT transcript FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def save_transcript_raw(recording_id: int, text: str) -> None:
+    """Persist the raw (pre-correction) Whisper transcript for a recording."""
+    log.info("save_transcript_raw  chars=%d  id=%d", len(text), recording_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET transcript_raw = ? WHERE id = ?",
+            (text, recording_id),
+        )
+
+
+def get_transcript_raw(recording_id: int) -> str | None:
+    """Return the raw Whisper transcript before LLM correction, or None."""
+    log.debug("get_transcript_raw  id=%d", recording_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT transcript_raw FROM recordings WHERE id = ?", (recording_id,)
         ).fetchone()
     return row[0] if row else None
 

@@ -14,31 +14,36 @@ log = logging.getLogger(__name__)
 MAX_CHUNK_BYTES = 24 * 1024 * 1024
 
 CORRECTION_PROMPT = (
-    "You are a transcription editor. "
+    "You are a transcription corrector. "
     "You will receive a raw speech-to-text transcript that may contain errors caused by "
-    "poor audio quality, background noise, or similar-sounding words. "
-    "Your task is to correct spelling, grammar, and word substitution errors while "
-    "preserving the original meaning, structure, and language of the transcript exactly. "
-    "Do not add, remove, or paraphrase any information. Return only the corrected text."
+    "poor audio quality, background noise, or similar-sounding words being mistranscribed. "
+    "Fix ONLY clear transcription errors: wrong homophones, garbled words, or obvious mishearings. "
+    "Do NOT: rephrase, restructure, improve style, fix grammar, add punctuation, "
+    "change word order, or alter anything that is not a transcription error. "
+    "If a word could be correct, leave it exactly as-is. "
+    "The output must be word-for-word identical to the input except for corrected mishearings. "
+    "Preserve any [HH:MM:SS] timestamp markers exactly as they appear. "
+    "Return only the corrected text, nothing else."
 )
 
 
-def _split_wav(path: str) -> list[str]:
-    """Split a WAV file into temp chunks that each fit under MAX_CHUNK_BYTES."""
+def _split_wav(path: str) -> list[tuple[str, float]]:
+    """Split a WAV file into temp chunks; return (path, start_seconds) pairs."""
     sample_rate, data = wav.read(path)
     bytes_per_sample = data.dtype.itemsize * (data.shape[1] if data.ndim > 1 else 1)
     max_samples = MAX_CHUNK_BYTES // bytes_per_sample
     num_chunks = math.ceil(len(data) / max_samples)
 
     log.info("File exceeds 24 MB — splitting into %d chunks", num_chunks)
-    chunk_paths = []
+    chunks = []
     for i in range(num_chunks):
         chunk_data = data[i * max_samples : (i + 1) * max_samples]
+        start_sec = (i * max_samples) / sample_rate
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         wav.write(tmp.name, sample_rate, chunk_data)
         tmp.close()
-        chunk_paths.append(tmp.name)
-    return chunk_paths
+        chunks.append((tmp.name, start_sec))
+    return chunks
 
 
 class Transcriber:
@@ -72,19 +77,21 @@ class Transcriber:
         if not filepath.lower().endswith(".wav"):
             raise ValueError("File exceeds 25 MB and is not a WAV — cannot auto-split.")
 
-        chunk_paths = _split_wav(filepath)
+        chunks = _split_wav(filepath)
         try:
             parts = []
             detected_language = "unknown"
-            for i, chunk_path in enumerate(chunk_paths, 1):
-                log.info("Transcribing chunk %d/%d", i, len(chunk_paths))
+            for i, (chunk_path, start_sec) in enumerate(chunks, 1):
+                log.info("Transcribing chunk %d/%d", i, len(chunks))
                 text, lang = self._transcribe_file(chunk_path)
-                parts.append(text)
+                h, rem = divmod(int(start_sec), 3600)
+                m, s = divmod(rem, 60)
+                parts.append(f"[{h:02d}:{m:02d}:{s:02d}] {text}")
                 if i == 1:
                     detected_language = lang
-            return " ".join(parts), detected_language
+            return "\n\n".join(parts), detected_language
         finally:
-            for chunk_path in chunk_paths:
+            for chunk_path, _ in chunks:
                 os.unlink(chunk_path)
 
     def _correct(self, raw_text: str) -> str:
@@ -104,6 +111,7 @@ class Transcriber:
             raw, language = self._transcribe_with_chunking(filepath)
             log.info("Detected language: %s  id=%d", language, recording_id)
             db.save_language(recording_id, language)
+            db.save_transcript_raw(recording_id, raw)
             text = self._correct(raw)
             db.save_transcript(recording_id, text)
             on_done(recording_id, text, language)
