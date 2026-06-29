@@ -1,9 +1,5 @@
-import os
-
-from openai import OpenAI
-
 from .. import db
-from .base import BaseAgent
+from .base import BaseAgent, make_llm_client
 
 _SYSTEM = (
     '''Eres un asistente de reuniones. Analiza el transcripto y llama a guardar_resumen` con un resumen conciso en español que incluya: 
@@ -38,10 +34,9 @@ class SummarizationAgent(BaseAgent):
     tools = _TOOLS
 
     def __init__(self):
-        super().__init__(OpenAI(
-            api_key=os.environ.get("DEEPSEEK_API_KEY"),
-            base_url="https://api.deepseek.com",
-        ))
+        client, model = make_llm_client()
+        self.model = model
+        super().__init__(client)
 
     def summarize_async(self, filepath: str, transcript: str, on_done) -> None:
         """Trigger summarization in a background thread.

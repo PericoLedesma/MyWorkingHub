@@ -5,19 +5,20 @@ import subprocess
 import threading
 import time
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QUrl, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
-    QSizePolicy, QVBoxLayout, QWidget, QComboBox,
+    QApplication, QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
+    QSizePolicy, QSlider, QVBoxLayout, QWidget, QComboBox,
 )
 
 from .agents.agent_orchestrator import ChatAgent
-from .db import delete_metadata, get_summary, get_transcript, load_metadata, update_filepath, update_tag
-from .recorder import FOLDER, Recorder
+from .db import clear_transcript_and_summary, delete_metadata, get_summary, get_transcript, load_metadata, save_metadata, update_filepath, update_tag
+from .recorder import ARCHIVE_FOLDER, FOLDER, Recorder
 from .agents.agent_summarization import SummarizationAgent
-from .transcriber import Transcriber
+from .transcriber import ENGINE_WHISPERX, ENGINES, Transcriber
 
 # ── Color palette (zinc / Linear aesthetic) ───────────────────────────────────
 _BG     = "#09090b"
@@ -51,9 +52,15 @@ _BADGE = {
     "mic":     ("#1a3152", "#60a5fa"),
     "app":     ("#271740", "#a78bfa"),
     "both":    ("#173028", "#34d399"),
+    "video":   ("#3a2a10", "#f59e0b"),
+    "audio":   ("#3a2a10", "#f59e0b"),
     "unknown": ("#1c1c20", "#52525b"),
 }
-_BADGE_LABEL = {"mic": "MIC", "app": "APP", "both": "MIC+APP", "unknown": "·"}
+_BADGE_LABEL = {"mic": "MIC", "app": "APP", "both": "MIC+APP", "video": "VIDEO", "audio": "AUDIO", "unknown": "·"}
+
+_VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
+_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma")
+_IMPORT_EXTENSIONS = _VIDEO_EXTENSIONS + _AUDIO_EXTENSIONS
 
 
 def _format_name(filepath: str) -> str:
@@ -115,6 +122,7 @@ class RecordingRow(QFrame):
         super().__init__(parent)
         self.setObjectName("recordingRow")
         self.setAttribute(Qt.WA_Hover, True)
+        self.setAttribute(Qt.WA_AlwaysShowToolTips, True)
         self._hovered = False
         self._apply_style()
 
@@ -167,10 +175,16 @@ class SmartRecorderApp(QMainWindow):
         self._record_start: float | None = None
         self._transcribing: set[str] = set()
         self._summarizing: set[str] = set()
-        self._filters: dict = {"project": None}
+        self._filters: dict = {"project": None, "show_archived": False}
         self._mic_on = True
-        self._app_on = False
+        self._app_on = True
         self._chat_history: list[dict] = []
+        self._player = QMediaPlayer(self)
+        self._audio_output = QAudioOutput(self)
+        self._player.setAudioOutput(self._audio_output)
+        self._player.positionChanged.connect(self._on_player_position)
+        self._player.durationChanged.connect(self._on_player_duration)
+        self._player_seeking = False
         self._blink_state = True
         self._pulse_on = False
 
@@ -300,7 +314,7 @@ class SmartRecorderApp(QMainWindow):
         self._mic_meter = LevelBar()
         self._mic_level_lbl = self._make_level_lbl()
 
-        self._app_btn = self._make_source_btn("App Audio", active=False)
+        self._app_btn = self._make_source_btn("App Audio", active=True)
         self._app_btn.clicked.connect(self._toggle_app_source)
         self._app_meter = LevelBar()
         self._app_level_lbl = self._make_level_lbl()
@@ -340,8 +354,37 @@ class SmartRecorderApp(QMainWindow):
         self._set_record_btn_style(recording=False)
         self._record_btn.clicked.connect(self._toggle_recording)
 
+        self._auto_transcribe_cb = QCheckBox("Auto-transcribir")
+        self._auto_transcribe_cb.setChecked(False)
+        self._auto_transcribe_cb.setToolTip(
+            "Si está marcado, cada grabación se transcribe automáticamente al finalizar,\n"
+            "usando el motor elegido a la derecha. Si no, queda guardada y puedes\n"
+            "transcribirla manualmente más tarde con el botón ⟳ de la lista."
+        )
+        self._auto_transcribe_cb.setStyleSheet(f"""
+            QCheckBox {{ color: {_T2}; font-size: 11px; background: transparent; }}
+            QCheckBox::indicator {{ width: 14px; height: 14px; }}
+        """)
+
+        self._engine_combo = QComboBox()
+        for engine_id, label in ENGINES.items():
+            self._engine_combo.addItem(label, engine_id)
+        self._engine_combo.setCurrentIndex(list(ENGINES.keys()).index(ENGINE_WHISPERX))  # free by default
+        self._engine_combo.setFixedSize(220, 26)
+        self._engine_combo.setToolTip(
+            "Motor de transcripción a usar (tanto en auto-transcripción como al pulsar ⟳):\n\n"
+            "• Gratis — Local rápido (WhisperX): corre en este equipo, sin coste.\n"
+            "  ~5x más rápido que tiempo real (≈10 min para 1h de audio). Requiere\n"
+            "  descargar el modelo y ffmpeg la primera vez (automático).\n\n"
+            "• Gratis — Local simple (faster-whisper): alternativa local más sencilla\n"
+            "  y algo más lenta, sin dependencia de ffmpeg.\n\n"
+            "• Pago — OpenAI API: el más rápido, pero consume créditos de tu cuenta."
+        )
+
         rl.addWidget(self._timer_label)
         rl.addWidget(self._record_btn)
+        rl.addWidget(self._auto_transcribe_cb)
+        rl.addWidget(self._engine_combo)
 
         layout.addWidget(rec_sec)
         layout.addStretch()
@@ -459,6 +502,20 @@ class SmartRecorderApp(QMainWindow):
             subprocess.Popen(["explorer", path])
         open_btn.clicked.connect(_open_folder)
         hl.addWidget(open_btn)
+
+        import_btn = QPushButton("Importar audio/vídeo")
+        import_btn.setFixedSize(128, 24)
+        import_btn.setToolTip("Importar un archivo de audio o vídeo para transcribirlo")
+        import_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {_T3};
+                border: 1px solid {_BD1}; border-radius: 4px; font-size: 11px;
+            }}
+            QPushButton:hover {{ color: {_T2}; border-color: {_BD2}; }}
+        """)
+        import_btn.clicked.connect(self._import_media)
+        hl.addWidget(import_btn)
+
         layout.addWidget(hdr)
 
         # Filter bar
@@ -476,7 +533,67 @@ class SmartRecorderApp(QMainWindow):
         self._project_combo.currentTextChanged.connect(self._on_project_filter_changed)
         fl.addWidget(self._project_combo)
         fl.addStretch()
+
+        # Archived toggle button
+        self._archive_btn = QPushButton("📦  Archivados")
+        self._archive_btn.setCheckable(True)
+        self._archive_btn.setChecked(False)
+        self._archive_btn.setFixedHeight(26)
+        self._archive_btn.setToolTip("Mostrar / ocultar grabaciones archivadas")
+        self._archive_btn.toggled.connect(self._on_archive_filter_toggled)
+        self._style_archive_btn(False)
+        fl.addWidget(self._archive_btn)
+
         layout.addWidget(filter_bar)
+
+        # Playback bar (hidden until something is played)
+        self._playbar = QWidget()
+        self._playbar.setStyleSheet(f"background: {_CARD}; border: 1px solid {_BD1}; border-radius: 6px;")
+        self._playbar.setVisible(False)
+        pb = QHBoxLayout(self._playbar)
+        pb.setContentsMargins(10, 6, 10, 6)
+        pb.setSpacing(8)
+
+        self._playbar_name = QLabel("")
+        self._playbar_name.setStyleSheet(f"font-size: 11px; color: {_T2}; background: transparent;")
+        self._playbar_name.setFixedWidth(140)
+        pb.addWidget(self._playbar_name)
+
+        self._pb_back_btn = QPushButton("-10s")
+        self._pb_back_btn.setFixedSize(44, 24)
+        self._pb_back_btn.clicked.connect(lambda: self._player_seek_relative(-10000))
+        pb.addWidget(self._pb_back_btn)
+
+        self._pb_playpause_btn = QPushButton("⏸")
+        self._pb_playpause_btn.setFixedSize(28, 24)
+        self._pb_playpause_btn.clicked.connect(self._toggle_playback)
+        pb.addWidget(self._pb_playpause_btn)
+
+        self._pb_fwd_btn = QPushButton("+10s")
+        self._pb_fwd_btn.setFixedSize(44, 24)
+        self._pb_fwd_btn.clicked.connect(lambda: self._player_seek_relative(10000))
+        pb.addWidget(self._pb_fwd_btn)
+
+        self._pb_slider = QSlider(Qt.Horizontal)
+        self._pb_slider.setRange(0, 0)
+        self._pb_slider.sliderPressed.connect(lambda: setattr(self, "_player_seeking", True))
+        self._pb_slider.sliderReleased.connect(self._on_slider_released)
+        pb.addWidget(self._pb_slider, stretch=1)
+
+        self._pb_time_lbl = QLabel("0:00 / 0:00")
+        self._pb_time_lbl.setStyleSheet(f"font-size: 11px; color: {_T3}; background: transparent;")
+        self._pb_time_lbl.setFixedWidth(86)
+        self._pb_time_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        pb.addWidget(self._pb_time_lbl)
+
+        for b in (self._pb_back_btn, self._pb_playpause_btn, self._pb_fwd_btn):
+            b.setStyleSheet(f"""
+                QPushButton {{ background: {_ACCENT_DIM}; color: {_ACCENT_LIT};
+                    border: 1px solid {_ACCENT_MID}; border-radius: 4px; font-size: 10px; }}
+                QPushButton:hover {{ background: {_ACCENT_MID}; }}
+            """)
+
+        layout.addWidget(self._playbar)
 
         # Scrollable list
         self._list_inner = QWidget()
@@ -693,18 +810,23 @@ class SmartRecorderApp(QMainWindow):
             dur = _format_duration(meta["duration"])
             self._log(f"Saved  {os.path.basename(meta['filepath'])}  ({dur})")
             self._recordings.insert(0, meta)
-            self._transcribing.add(meta["filepath"])
-            self._rebuild_list()
-            self._log(f"Transcribing…  {os.path.basename(meta['filepath'])}")
-            self._transcriber.transcribe_async(
-                meta["filepath"],
-                on_done=lambda fp, text: self._sig_transcribed.emit(fp, text),
-            )
+            if self._auto_transcribe_cb.isChecked():
+                self._transcribing.add(meta["filepath"])
+                self._rebuild_list()
+                self._log(f"Transcribing…  {os.path.basename(meta['filepath'])}")
+                self._transcriber.transcribe_async(
+                    meta["filepath"],
+                    on_done=lambda fp, text: self._sig_transcribed.emit(fp, text),
+                    engine=self._engine_combo.currentData(),
+                )
+            else:
+                self._rebuild_list()
         else:
             self._log("Recording stopped — no audio captured")
 
-    def _on_transcribed(self, filepath: str, text: str | None):
+    def _on_transcribed(self, filepath: str, result):
         self._transcribing.discard(filepath)
+        text = result if isinstance(result, str) else None
         for rec in self._recordings:
             if rec["filepath"] == filepath:
                 rec["has_transcript"] = text is not None
@@ -722,7 +844,8 @@ class SmartRecorderApp(QMainWindow):
                 on_done=lambda fp, s: self._sig_summarized.emit(fp, s),
             )
         else:
-            self._log(f"Transcription failed  {name}  (check OPENAI_API_KEY)")
+            reason = str(result) if result is not None else "unknown error"
+            self._log(f"Transcription failed  {name}  — {reason}")
         self._rebuild_list()
 
     def _on_summarized(self, filepath: str, summary: str | None):
@@ -791,8 +914,38 @@ class SmartRecorderApp(QMainWindow):
                 seen.append(p)
         return sorted(seen)
 
+    @staticmethod
+    def _is_archived(rec: dict) -> bool:
+        return os.path.normpath(rec["filepath"]).startswith(os.path.normpath(ARCHIVE_FOLDER))
+
+    def _style_archive_btn(self, active: bool):
+        if active:
+            self._archive_btn.setStyleSheet(f"""
+                QPushButton {{ background: #3a2a10; color: #f59e0b;
+                    border: 1px solid #92400e; border-radius: 4px;
+                    font-size: 11px; padding: 0 10px; }}
+                QPushButton:hover {{ background: #4a3a18; }}
+            """)
+        else:
+            self._archive_btn.setStyleSheet(f"""
+                QPushButton {{ background: transparent; color: {_T3};
+                    border: 1px solid {_BD1}; border-radius: 4px;
+                    font-size: 11px; padding: 0 10px; }}
+                QPushButton:hover {{ color: {_T2}; border-color: {_BD2}; }}
+            """)
+
+    def _on_archive_filter_toggled(self, checked: bool):
+        self._filters["show_archived"] = checked
+        self._style_archive_btn(checked)
+        # Update button label with count
+        n = sum(1 for r in self._recordings if self._is_archived(r))
+        self._archive_btn.setText(f"📦  Archivados ({n})" if n else "📦  Archivados")
+        self._rebuild_list()
+
     def _apply_filters(self) -> list[dict]:
-        result = self._recordings
+        show_archived = self._filters.get("show_archived", False)
+        result = [r for r in self._recordings
+                  if self._is_archived(r) == show_archived]
         proj = self._filters.get("project")
         if proj:
             result = [r for r in result if (r.get("project") or "").strip() == proj]
@@ -815,6 +968,9 @@ class SmartRecorderApp(QMainWindow):
         self._rebuild_list()
 
     def _rebuild_list(self):
+        # Keep archived button label up to date
+        n = sum(1 for r in self._recordings if self._is_archived(r))
+        self._archive_btn.setText(f"📦  Archivados ({n})" if n else "📦  Archivados")
         records = self._apply_filters()
 
         while self._list_layout.count() > 1:
@@ -854,6 +1010,7 @@ class SmartRecorderApp(QMainWindow):
                 " border: 1px solid #151e28; border-radius: 4px; font-size: 10px; font-weight: 700; }"
             )
         else:
+            btn.setToolTip("Re-run transcription for this recording")
             btn.clicked.connect(lambda _=False, p=filepath: self._retranscribe(p))
             btn.setStyleSheet(
                 "QPushButton { background: transparent; color: #3a5070;"
@@ -871,6 +1028,7 @@ class SmartRecorderApp(QMainWindow):
                 " border: 1px solid #1e3f80; border-radius: 4px; font-size: 10px; font-weight: 700; }"
                 " QPushButton:hover { background: #1e3f80; }"
             )
+            btn.setToolTip("View transcript")
             btn.clicked.connect(lambda _=False, p=filepath: self._view_transcript(p))
         else:
             btn.setEnabled(False)
@@ -897,6 +1055,7 @@ class SmartRecorderApp(QMainWindow):
                 " border: 1px solid #101810; border-radius: 4px; font-size: 10px; font-weight: 700; }"
             )
         else:
+            btn.setToolTip("Generate / regenerate summary for this recording")
             btn.clicked.connect(lambda _=False, p=filepath: self._resummarize(p))
             btn.setStyleSheet(
                 f"QPushButton {{ background: transparent; color: #1e4028;"
@@ -914,6 +1073,7 @@ class SmartRecorderApp(QMainWindow):
                 f" border: 1px solid #1e3828; border-radius: 4px; font-size: 10px; font-weight: 700; }}"
                 f" QPushButton:hover {{ background: #1e3828; }}"
             )
+            btn.setToolTip("View summary")
             btn.clicked.connect(lambda _=False, p=filepath: self._view_summary(p))
         else:
             btn.setEnabled(False)
@@ -934,6 +1094,7 @@ class SmartRecorderApp(QMainWindow):
         source = rec.get("source", "unknown")
         file_missing = rec.get("file_missing", False)
         auto_imported = rec.get("auto_imported", False)
+        is_archived = self._is_archived(rec)
         bg_c, fg_c = _BADGE.get(source, _BADGE["unknown"])
 
         # Source badge
@@ -947,6 +1108,15 @@ class SmartRecorderApp(QMainWindow):
             }}
         """)
         layout.addWidget(badge)
+
+        # Archive indicator
+        if is_archived:
+            arch_lbl = QLabel("📦")
+            arch_lbl.setFixedSize(20, 22)
+            arch_lbl.setAlignment(Qt.AlignCenter)
+            arch_lbl.setToolTip("Grabación archivada")
+            arch_lbl.setStyleSheet("background: transparent; font-size: 13px;")
+            layout.addWidget(arch_lbl)
 
         # Name
         if file_missing:
@@ -973,6 +1143,7 @@ class SmartRecorderApp(QMainWindow):
         # Project
         proj_entry = QLineEdit()
         proj_entry.setPlaceholderText("Project…")
+        proj_entry.setToolTip("Assign a project — moves the file into a project subfolder")
         proj_entry.setFixedSize(88, 26)
         if rec.get("project"):
             proj_entry.setText(rec["project"])
@@ -1000,6 +1171,7 @@ class SmartRecorderApp(QMainWindow):
         # Meeting
         meet_entry = QLineEdit()
         meet_entry.setPlaceholderText("Meeting…")
+        meet_entry.setToolTip("Meeting / session label for this recording")
         meet_entry.setFixedSize(88, 26)
         if rec.get("meeting"):
             meet_entry.setText(rec["meeting"])
@@ -1043,12 +1215,25 @@ class SmartRecorderApp(QMainWindow):
             play_btn.setEnabled(False)
             play_btn.setToolTip("Audio file not found — cannot play")
         else:
+            play_btn.setToolTip("Play recording")
             play_btn.clicked.connect(lambda _=False, p=filepath: self._play(p))
         layout.addWidget(play_btn)
+
+        # Open containing folder
+        folder_btn = QPushButton("📁")
+        folder_btn.setFixedSize(26, 26)
+        folder_btn.setToolTip("Open containing folder")
+        folder_btn.setStyleSheet(f"""
+            QPushButton {{ background: transparent; border: none; font-size: 11px; color: {_T3}; }}
+            QPushButton:hover {{ color: {_T1}; }}
+        """)
+        folder_btn.clicked.connect(lambda _=False, p=filepath: self._open_containing_folder(p))
+        layout.addWidget(folder_btn)
 
         # Delete
         del_btn = QPushButton("✕")
         del_btn.setFixedSize(26, 26)
+        del_btn.setToolTip("Delete recording (also removes transcript and summary)")
         del_btn.setStyleSheet(f"""
             QPushButton {{ background: transparent; border: none; font-size: 11px; color: {_T3}; }}
             QPushButton:hover {{ color: {_RED}; }}
@@ -1075,10 +1260,14 @@ class SmartRecorderApp(QMainWindow):
         )
 
     def _add_chat_bubble(self, text: str, role: str):
+        # QLabel with text-interaction flags = selectable + Ctrl+C copyable, no size issues
         bubble = QLabel(text)
         bubble.setWordWrap(True)
-        bubble.setMaximumWidth(224)
+        bubble.setMaximumWidth(220)
         bubble.setContentsMargins(10, 7, 10, 7)
+        bubble.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
 
         if role == "user":
             bubble.setStyleSheet(f"""
@@ -1100,7 +1289,7 @@ class SmartRecorderApp(QMainWindow):
         row_widget = QWidget()
         row_widget.setStyleSheet("background: transparent;")
         row_layout = QHBoxLayout(row_widget)
-        row_layout.setContentsMargins(4, 0, 4, 0)
+        row_layout.setContentsMargins(2, 2, 2, 2)
         row_layout.setSpacing(0)
 
         if role == "user":
@@ -1138,7 +1327,10 @@ class SmartRecorderApp(QMainWindow):
         if not os.path.exists(old_fp):
             return old_fp
         try:
-            shutil.move(old_fp, new_fp)
+            # Use copy+delete instead of shutil.move — on OneDrive, shutil.move can
+            # silently copy without deleting the source, creating phantom duplicates.
+            shutil.copy2(old_fp, new_fp)
+            os.remove(old_fp)
         except OSError as exc:
             self._log(f"Warning: could not move {os.path.basename(old_fp)}: {exc}")
             return old_fp
@@ -1153,15 +1345,82 @@ class SmartRecorderApp(QMainWindow):
         self._log_box.clear()
 
     def _delete(self, rec: dict):
-        delete_metadata(rec["filepath"])
+        name = os.path.basename(rec["filepath"])
+
+        # ── Step 1: archive / delete / cancel ────────────────────────────────
         if rec.get("file_missing"):
-            self._log(f"Removed metadata for missing file  {os.path.basename(rec['filepath'])}")
+            # File already gone — skip to metadata question
+            do_archive = False
+            do_delete  = True
         else:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Gestionar grabación")
+            msg.setText(f"{name}")
+            msg.setInformativeText("¿Qué quieres hacer con este audio?")
+            btn_archive = msg.addButton("📦  Archivar", QMessageBox.ActionRole)
+            btn_delete  = msg.addButton("🗑  Eliminar", QMessageBox.DestructiveRole)
+            msg.addButton("Cancelar", QMessageBox.RejectRole)
+            msg.setDefaultButton(btn_archive)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked is btn_archive:
+                do_archive, do_delete = True, False
+            elif clicked is btn_delete:
+                do_archive, do_delete = False, True
+            else:
+                return  # Cancel
+
+        if do_archive:
+            project = rec.get("project", "").strip()
+            archive_dir = os.path.join(ARCHIVE_FOLDER, project) if project else ARCHIVE_FOLDER
+            os.makedirs(archive_dir, exist_ok=True)
+            new_fp = os.path.join(archive_dir, name)
+            try:
+                shutil.copy2(rec["filepath"], new_fp)
+                os.remove(rec["filepath"])
+                update_filepath(rec["filepath"], new_fp)
+                rec["filepath"] = new_fp
+                dest = os.path.join(project, name) if project else name
+                self._log(f"Archivado  {name}  →  archivados/{dest}")
+            except OSError as exc:
+                self._log(f"Warning: no se pudo archivar {name}: {exc}")
+            self._refresh_project_combo()
+            self._rebuild_list()
+            return
+
+        if not rec.get("file_missing"):
             try:
                 os.remove(rec["filepath"])
+                self._log(f"Audio eliminado  {name}")
             except OSError as exc:
-                self._log(f"Warning: could not delete {os.path.basename(rec['filepath'])}: {exc}")
-            self._log(f"Deleted  {os.path.basename(rec['filepath'])}")
+                self._log(f"Warning: could not delete {name}: {exc}")
+        else:
+            self._log(f"Metadata eliminada para archivo perdido  {name}")
+
+        # ── Step 2: optionally delete transcript & summary ────────────────────
+        if rec.get("has_transcript") or rec.get("has_summary"):
+            ans_trans = QMessageBox.question(
+                self,
+                "Eliminar transcripción y resumen",
+                f"¿Eliminar también la transcripción y el resumen de\n{name}?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if ans_trans == QMessageBox.Yes:
+                delete_metadata(rec["filepath"])
+                self._log(f"Transcripción y resumen eliminados  {name}")
+            else:
+                # Keep transcript/summary but mark row as file-missing
+                self._log(f"Transcripción conservada  {name}")
+                rec["file_missing"] = True
+                rec["has_transcript"] = rec.get("has_transcript", False)
+                self._transcribing.discard(rec["filepath"])
+                self._rebuild_list()
+                return
+        else:
+            # No transcript to worry about — delete the whole row
+            delete_metadata(rec["filepath"])
+
         self._transcribing.discard(rec["filepath"])
         if rec in self._recordings:
             self._recordings.remove(rec)
@@ -1172,14 +1431,79 @@ class SmartRecorderApp(QMainWindow):
         if not os.path.exists(filepath):
             self._log(f"File not found — cannot play  {os.path.basename(filepath)}")
             return
-        threading.Thread(
-            target=lambda: subprocess.run(
-                ["powershell", "-c",
-                 f'(New-Object System.Media.SoundPlayer "{filepath}").PlaySync()'],
-                check=False,
-            ),
-            daemon=True,
-        ).start()
+        self._playbar_name.setText(_format_name(filepath))
+        self._playbar.setVisible(True)
+        self._pb_playpause_btn.setText("⏸")
+        self._player.setSource(QUrl.fromLocalFile(filepath))
+        self._player.play()
+
+    def _toggle_playback(self):
+        if self._player.playbackState() == QMediaPlayer.PlayingState:
+            self._player.pause()
+            self._pb_playpause_btn.setText("▶")
+        else:
+            self._player.play()
+            self._pb_playpause_btn.setText("⏸")
+
+    def _import_media(self):
+        filters = "Audio/Vídeo (*" + " *".join(_IMPORT_EXTENSIONS) + ")"
+        path, _ = QFileDialog.getOpenFileName(self, "Importar audio/vídeo", "", filters)
+        if not path:
+            return
+
+        ext = os.path.splitext(path)[1].lower()
+        source = "video" if ext in _VIDEO_EXTENSIONS else "audio"
+
+        proj = self._filters.get("project") or ""
+        dest_dir = os.path.join(FOLDER, proj) if proj else FOLDER
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_path = os.path.join(dest_dir, os.path.basename(path))
+        if os.path.exists(dest_path):
+            self._log(f"Ya existe un archivo con ese nombre  {os.path.basename(dest_path)}")
+            return
+
+        try:
+            shutil.copy2(path, dest_path)
+        except OSError as exc:
+            self._log(f"No se pudo importar el archivo: {exc}")
+            return
+
+        now = datetime.datetime.now()
+        meta = save_metadata(dest_path, source, now, now, 0, 0)
+        if proj:
+            update_tag(dest_path, "project", proj)
+            meta["project"] = proj
+        self._recordings.insert(0, meta)
+        self._refresh_project_combo()
+        self._rebuild_list()
+        self._log(f"Importado  {os.path.basename(dest_path)}  — usa ⟳ para transcribirlo")
+
+    def _player_seek_relative(self, delta_ms: int):
+        new_pos = max(0, min(self._player.duration(), self._player.position() + delta_ms))
+        self._player.setPosition(new_pos)
+
+    def _on_slider_released(self):
+        self._player.setPosition(self._pb_slider.value())
+        self._player_seeking = False
+
+    def _on_player_position(self, position_ms: int):
+        if not self._player_seeking:
+            self._pb_slider.setValue(position_ms)
+        self._pb_time_lbl.setText(
+            f"{_format_duration(position_ms / 1000)} / {_format_duration(self._player.duration() / 1000)}"
+        )
+
+    def _on_player_duration(self, duration_ms: int):
+        self._pb_slider.setRange(0, duration_ms)
+
+    def _open_containing_folder(self, filepath: str):
+        if os.path.exists(filepath):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(filepath)])
+        else:
+            folder = os.path.dirname(filepath) or FOLDER
+            if not os.path.isdir(folder):
+                folder = FOLDER
+            subprocess.Popen(["explorer", os.path.normpath(folder)])
 
     def _view_transcript(self, filepath: str):
         transcript = get_transcript(filepath)
@@ -1201,13 +1525,45 @@ class SmartRecorderApp(QMainWindow):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
-        if summary:
-            sum_lbl = QLabel("SUMMARY")
-            sum_lbl.setStyleSheet(
+        _copy_btn_style = f"""
+            QPushButton {{
+                background: transparent; color: {_T3};
+                border: 1px solid {_BD1}; border-radius: 4px;
+                font-size: 10px; padding: 1px 8px;
+            }}
+            QPushButton:hover {{ color: {_T1}; border-color: {_BD2}; }}
+            QPushButton:pressed {{ color: {_ACCENT_LIT}; }}
+        """
+
+        def _make_section_header(title: str, get_text) -> QWidget:
+            hdr = QWidget()
+            hdr.setStyleSheet("background: transparent;")
+            hl = QHBoxLayout(hdr)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(8)
+            lbl = QLabel(title)
+            lbl.setStyleSheet(
                 f"font-size: 10px; font-weight: 600; letter-spacing: 1px; "
                 f"color: {_T3}; background: transparent;"
             )
-            layout.addWidget(sum_lbl)
+            hl.addWidget(lbl)
+            hl.addStretch()
+            copy_btn = QPushButton("⎘  Copiar")
+            copy_btn.setFixedHeight(20)
+            copy_btn.setStyleSheet(_copy_btn_style)
+            copy_btn.setToolTip(f"Copiar {title.lower()} al portapapeles")
+
+            def _do_copy(get=get_text, btn=copy_btn):
+                QApplication.clipboard().setText(get())
+                btn.setText("✓  Copiado")
+                QTimer.singleShot(1500, lambda: btn.setText("⎘  Copiar"))
+
+            copy_btn.clicked.connect(_do_copy)
+            hl.addWidget(copy_btn)
+            return hdr
+
+        if summary:
+            layout.addWidget(_make_section_header("SUMMARY", lambda: summary))
 
             sum_box = QPlainTextEdit(summary)
             sum_box.setReadOnly(True)
@@ -1226,12 +1582,7 @@ class SmartRecorderApp(QMainWindow):
             sep.setStyleSheet(f"background-color: {_BD1};")
             layout.addWidget(sep)
 
-        tx_lbl = QLabel("TRANSCRIPT")
-        tx_lbl.setStyleSheet(
-            f"font-size: 10px; font-weight: 600; letter-spacing: 1px; "
-            f"color: {_T3}; background: transparent;"
-        )
-        layout.addWidget(tx_lbl)
+        layout.addWidget(_make_section_header("TRANSCRIPT", lambda: transcript))
 
         txt = QPlainTextEdit(transcript)
         txt.setReadOnly(True)
@@ -1256,10 +1607,13 @@ class SmartRecorderApp(QMainWindow):
             return
         self._transcribing.add(filepath)
         self._rebuild_list()
-        self._log(f"Transcribing…  {os.path.basename(filepath)}")
+        engine = self._engine_combo.currentData()
+        engine_label = self._engine_combo.currentText()
+        self._log(f"Transcribing…  {os.path.basename(filepath)}  [{engine_label}]")
         self._transcriber.transcribe_async(
             filepath,
             on_done=lambda fp, text: self._sig_transcribed.emit(fp, text),
+            engine=engine,
         )
 
     def _resummarize(self, filepath: str):

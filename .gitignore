@@ -1,6 +1,9 @@
 # Virtual environment
 .venv/
 
+# Bundled ffmpeg (auto-downloaded on first run, see src/transcriber.py)
+tools/ffmpeg/
+
 # IDE
 .idea/
 

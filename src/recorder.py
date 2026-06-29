@@ -1,6 +1,9 @@
 import datetime
+import logging
 import os
 import threading
+
+log = logging.getLogger(__name__)
 
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -8,8 +11,10 @@ import soundfile as sf
 
 from .db import DATA_DIR, save_metadata
 
-FOLDER = os.path.join(DATA_DIR, "recordings")
+FOLDER         = os.path.join(DATA_DIR, "recordings")
+ARCHIVE_FOLDER = os.path.join(DATA_DIR, "archivados")
 os.makedirs(FOLDER, exist_ok=True)
+os.makedirs(ARCHIVE_FOLDER, exist_ok=True)
 
 MIC_RATE = 44100
 
@@ -243,6 +248,7 @@ class Recorder:
             mic_stream.close()
             app_stream.close()
         except Exception:
+            log.exception("run_both: stream error")
             self._on_done(None)
             return
         finally:
@@ -253,7 +259,14 @@ class Recorder:
             mixed, rate = _mix_audio(mic_chunks, app_chunks, app_rate, app_channels, mic_rate)
             sf.write(filepath, mixed, rate)
             self._on_done(save_metadata(filepath, "both", start_time, end_time, rate, app_channels))
+        elif mic_chunks:
+            # App audio stream opened but captured nothing (e.g. no system sound playing) — save mic only
+            log.warning("run_both: app_chunks empty, saving mic-only audio")
+            data = np.concatenate(mic_chunks)
+            sf.write(filepath, data, mic_rate)
+            self._on_done(save_metadata(filepath, "mic", start_time, end_time, mic_rate, 1))
         else:
+            log.warning("run_both: no audio captured in either stream")
             self._on_done(None)
 
     def monitor(self, stop: threading.Event):

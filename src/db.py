@@ -5,7 +5,7 @@ import sqlite3
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_DATA_DIR = r"C:\Users\p.ledesma.jimenez\OneDrive - Accenture\Desktop\MyDB"
+_DEFAULT_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 DATA_DIR = os.environ.get("SMART_RECORDER_DATA_DIR", _DEFAULT_DATA_DIR)
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "smart_recorder.db")
@@ -321,3 +321,13 @@ def delete_metadata(filepath: str) -> None:
     log.info("delete_metadata  file=%s", os.path.basename(filepath))
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM recordings WHERE filepath = ?", (filepath,))
+
+
+def clear_transcript_and_summary(filepath: str) -> None:
+    """Erase only the transcript and summary columns, keeping the row (and audio file ref) intact."""
+    log.info("clear_transcript_and_summary  file=%s", os.path.basename(filepath))
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET transcript = NULL, summary = NULL WHERE filepath = ?",
+            (filepath,),
+        )

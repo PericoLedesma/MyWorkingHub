@@ -1,10 +1,32 @@
 import json
 import logging
+import os
 import threading
 
 from openai import OpenAI
 
 log = logging.getLogger(__name__)
+
+
+def make_llm_client() -> tuple[OpenAI, str]:
+    """Build an OpenAI-compatible client from whichever provider key is available.
+
+    Some networks block DeepSeek, others don't issue OpenAI credit — so each
+    teammate may only have one of the two keys. Preference order:
+    DeepSeek first (cheaper), falling back to OpenAI if no DeepSeek key is set.
+
+    Returns (client, model_name).
+    """
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+    if deepseek_key:
+        return OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com"), "deepseek-chat"
+
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    if openai_key:
+        return OpenAI(api_key=openai_key), "gpt-4o-mini"
+
+    # Neither key set — let calls fail naturally with a clear auth error.
+    return OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com"), "deepseek-chat"
 
 
 class BaseAgent:

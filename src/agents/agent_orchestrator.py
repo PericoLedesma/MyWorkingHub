@@ -1,9 +1,5 @@
-import os
-
-from openai import OpenAI
-
 from .. import db
-from .base import BaseAgent
+from .base import BaseAgent, make_llm_client
 
 _SYSTEM = (
     '''
@@ -44,10 +40,9 @@ class ChatAgent(BaseAgent):
     tools = _TOOLS
 
     def __init__(self):
-        super().__init__(OpenAI(
-            api_key=os.environ.get("DEEPSEEK_API_KEY"),
-            base_url="https://api.deepseek.com",
-        ))
+        client, model = make_llm_client()
+        self.model = model
+        super().__init__(client)
 
     def send_async(self, messages: list[dict], on_response) -> None:
         def _buscar_grabaciones(consulta: str) -> list[dict]:

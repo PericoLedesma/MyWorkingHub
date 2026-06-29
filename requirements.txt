@@ -3,3 +3,4 @@ numpy
 pyaudiowpatch
 soundfile
 openai
+faster-whisper
