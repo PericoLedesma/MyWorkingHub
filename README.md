@@ -11,7 +11,6 @@ Windows GUI app that records microphone, system/app audio (WASAPI loopback), or 
 - Auto-summarization via DeepSeek — triggers automatically after transcription completes
 - Structured summaries with **KEY TOPICS / DECISIONS / ACTION ITEMS** sections
 - Click **T** on any row to view summary + RAW and CORRECTED transcripts side by side
-- WhisperX transcription with speaker diarization — separate **⟳X** (run) and **TX** (view) buttons per row
 - Real-time VU meters with color feedback (green → yellow → red)
 - Live recording timer
 - Recordings saved as WAV; transcripts and summary stored in SQLite
@@ -25,7 +24,7 @@ Windows GUI app that records microphone, system/app audio (WASAPI loopback), or 
 ## Requirements
 
 - Windows (WASAPI loopback is Windows-only)
-- Python 3.11+
+- Python (latest recommended)
 - `OPENAI_API_KEY` env var (for Whisper transcription)
 - `DEEPSEEK_API_KEY` env var (for chat assistant and summaries)
 
@@ -33,36 +32,36 @@ Windows GUI app that records microphone, system/app audio (WASAPI loopback), or 
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Set your API keys:
+Add your API keys to a `.env` file in the project root:
 
-```powershell
-$env:OPENAI_API_KEY   = "sk-..."
-$env:DEEPSEEK_API_KEY = "sk-..."
+```
+OPENAI_API_KEY=sk-...
+DEEPSEEK_API_KEY=sk-...
 ```
 
 Data is stored in `%USERPROFILE%\OneDrive - Accenture\Desktop\MyDB` by default. Override with:
 
-```powershell
-$env:SMART_RECORDER_DATA_DIR = "C:\your\preferred\path"
+```
+SMART_RECORDER_DATA_DIR=C:\your\preferred\path
 ```
 
 ## Usage
 
 ```powershell
-python main.py
+.\launch.ps1
 ```
 
-Toggle **Microphone** / **App Audio**, click **Record**, click **Stop**. Transcription starts automatically, followed by summarization. Click **T** on any row to read the summary and both the raw and corrected transcripts side by side. Click **⟳X** to run WhisperX diarization, then **TX** to view the speaker-labeled result. Use the **Assistant** panel on the right to chat about your recordings.
+Toggle **Microphone** / **App Audio**, click **Record**, click **Stop**. Transcription starts automatically, followed by summarization. Click **T** on any row to read the summary and both the raw and corrected transcripts side by side. Use the **Assistant** panel on the right to chat about your recordings.
 
 ## Project Structure
 
 ```
 SmartRecorder/
 ├── main.py              # Entry point — dark theme, Fusion style
+├── launch.ps1           # Launcher — loads .env, activates venv, starts app (no console window)
 ├── requirements.txt
 ├── src/
 │   ├── app.py           # PySide6 GUI — wires all components
@@ -93,8 +92,7 @@ Record → WAV file → Whisper → Transcript → DeepSeek → Summary
 2. **Record** — `Recorder` captures mic and/or system audio via PyAudio, saves a `.wav` file, and stores metadata in the DB.
 3. **Transcribe** *(auto)* — `Transcriber` sends the `.wav` to OpenAI Whisper (`whisper-1`). The raw output is saved immediately, then passed through GPT-4o-mini which fixes only clear mishearings (wrong homophones, garbled words). Both versions are stored in the DB and shown side by side in the viewer.
 4. **Summarize** *(auto)* — `SummarizationAgent` sends the corrected transcript to DeepSeek with a `guardar_resumen` tool. DeepSeek generates a structured summary (KEY TOPICS / DECISIONS / ACTION ITEMS) and calls the tool to persist it.
-5. **Diarize** *(optional)* — Clicking **⟳X** runs WhisperX locally to produce a speaker-labeled transcript (`[SPEAKER_00] text...`), stored separately in the DB. Click **TX** to view it.
-6. **Chat** — `ChatAgent` sends user questions to DeepSeek with a `buscar_grabaciones` tool. DeepSeek searches the transcript DB and answers in Spanish.
+5. **Chat** — `ChatAgent` sends user questions to DeepSeek with a `buscar_grabaciones` tool. DeepSeek searches the transcript DB and answers in Spanish.
 
 ## Architecture
 
@@ -102,7 +100,7 @@ Record → WAV file → Whisper → Transcript → DeepSeek → Summary
 - Callbacks are marshalled safely onto the Qt main thread via PySide6 `Signal`/`emit`.
 - Post-recording pipeline: **record → transcribe (Whisper) → summarize (DeepSeek)** — each step triggers the next automatically.
 - Agents inherit from `BaseAgent`, which drives a tool-calling loop against the DeepSeek API. `SummarizationAgent` uses a `guardar_resumen` tool to persist summaries; `ChatAgent` uses a `buscar_grabaciones` tool to search recording transcripts and responds in Spanish.
-- The `recordings` SQLite table stores `transcript_raw`, `transcript` (corrected), `summary`, `transcript_x`, `project`, `meeting`, and `language` per row. Sidecar `.txt` files from older versions are migrated automatically on first run. Schema is versioned (currently v5) with automatic migrations on startup.
+- The `recordings` SQLite table stores `transcript_raw`, `transcript` (corrected), `summary`, `project`, `meeting`, and `language` per row. Sidecar `.txt` files from older versions are migrated automatically on first run. Schema is versioned with automatic migrations on startup.
 
 
 ## List of ToDo

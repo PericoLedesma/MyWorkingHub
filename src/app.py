@@ -2,23 +2,26 @@ import datetime
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
+import wave
+
+_SUBPROCESS_FLAGS = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter
 from PySide6.QtWidgets import (
-    QDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPlainTextEdit, QPushButton, QScrollArea,
+    QDialog, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
     QSizePolicy, QTextEdit, QVBoxLayout, QWidget, QComboBox,
 )
 
 from .agents.agent_orchestrator import ChatAgent
-from .db import delete_metadata, get_language, get_summary, get_transcript, get_transcript_raw, get_transcript_x, load_metadata, update_filepath, update_tag
-from .recorder import FOLDER, Recorder
+from .db import delete_metadata, get_language, get_summary, get_transcript, get_transcript_raw, load_metadata, save_metadata, update_filepath, update_tag
+from .recorder import FOLDER, Recorder, list_input_devices
 from .agents.agent_summarization import SummarizationAgent
 from .transcriber import Transcriber
-from .transcriber_x import TranscriberX
 
 # ── Color palette (zinc / Linear aesthetic) ───────────────────────────────────
 _BG     = "#09090b"
@@ -148,9 +151,8 @@ class RecordingRow(QFrame):
 
 
 class SmartRecorderApp(QMainWindow):
-    _sig_recording_done  = Signal(object)
+    _sig_recording_done  = Signal(object, object)
     _sig_transcribed     = Signal(int, object, str)
-    _sig_transcribed_x   = Signal(int, object)
     _sig_summarized      = Signal(int, object)
     _sig_agent_response  = Signal(object)
 
@@ -168,7 +170,6 @@ class SmartRecorderApp(QMainWindow):
         self._recordings: list[dict] = []
         self._record_start: float | None = None
         self._transcribing: set[int] = set()
-        self._transcribing_x: set[int] = set()
         self._summarizing: set[int] = set()
         self._filters: dict = {"project": None}
         self._mic_on = True
@@ -179,7 +180,6 @@ class SmartRecorderApp(QMainWindow):
 
         self._sig_recording_done.connect(self._on_done)
         self._sig_transcribed.connect(self._on_transcribed)
-        self._sig_transcribed_x.connect(self._on_transcribed_x)
         self._sig_summarized.connect(self._on_summarized)
         self._sig_agent_response.connect(self._on_agent_response)
 
@@ -190,11 +190,20 @@ class SmartRecorderApp(QMainWindow):
             on_done=self._sig_recording_done.emit,
         )
         self._transcriber = Transcriber()
-        self._transcriber_x = TranscriberX()
         self._summarizer = SummarizationAgent()
         self._agent = ChatAgent()
 
+        self._mic_devices: list[tuple[int, str]] = list_input_devices()
+
         self._build_ui()
+
+        # Pre-select the device that auto-detect would have chosen
+        default_idx = self._default_mic_combo_index()
+        self._mic_combo.blockSignals(True)
+        self._mic_combo.setCurrentIndex(default_idx)
+        self._mic_combo.blockSignals(False)
+        if self._mic_devices:
+            self._recorder.mic_device_index = self._mic_devices[default_idx][0]
 
         self._level_timer = QTimer(self)
         self._level_timer.timeout.connect(self._poll_level)
@@ -230,6 +239,10 @@ class SmartRecorderApp(QMainWindow):
         file_menu = mb.addMenu("File")
         scan_action = file_menu.addAction("Scan DB")
         scan_action.triggered.connect(self._scan_db)
+        file_menu.addSeparator()
+        import_action = file_menu.addAction("Import Recording")
+        import_action.setShortcut("Ctrl+I")
+        import_action.triggered.connect(self._import_recording)
 
     def _hline(self):
         line = QFrame()
@@ -323,6 +336,50 @@ class SmartRecorderApp(QMainWindow):
             row_l.addWidget(meter)
             row_l.addWidget(pct_lbl)
             src_layout.addWidget(row_w)
+
+        # ── Import File ──
+        self._import_btn = self._make_source_btn("Import File", active=False)
+        self._import_btn.clicked.connect(self._import_recording)
+        self._import_file_lbl = QLabel("—")
+        self._import_file_lbl.setStyleSheet(f"font-size: 10px; color: {_T3}; background: transparent;")
+        import_row = QWidget()
+        import_row.setStyleSheet("background: transparent;")
+        import_row_l = QHBoxLayout(import_row)
+        import_row_l.setContentsMargins(0, 0, 0, 0)
+        import_row_l.setSpacing(8)
+        import_row_l.addWidget(self._import_btn)
+        import_row_l.addWidget(self._import_file_lbl)
+        import_row_l.addStretch()
+        src_layout.addWidget(import_row)
+
+        # ── Mic device picker ──
+        device_row = QWidget()
+        device_row.setStyleSheet("background: transparent;")
+        dl = QHBoxLayout(device_row)
+        dl.setContentsMargins(0, 2, 0, 0)
+        dl.setSpacing(6)
+        dev_lbl = QLabel("Device:")
+        dev_lbl.setStyleSheet(f"font-size: 10px; color: {_T3}; background: transparent;")
+        dev_lbl.setFixedWidth(42)
+        self._mic_combo = QComboBox()
+        self._mic_combo.addItems([name for _, name in self._mic_devices] or ["(no input devices)"])
+        self._mic_combo.setStyleSheet(f"""
+            QComboBox {{
+                background: {_INPUT}; color: {_T2}; border: 1px solid {_BD1};
+                border-radius: 4px; font-size: 10px; padding: 2px 6px;
+            }}
+            QComboBox:disabled {{ color: {_T3}; }}
+            QComboBox::drop-down {{ border: none; width: 16px; }}
+            QComboBox QAbstractItemView {{
+                background: {_CARD}; color: {_T1}; border: 1px solid {_BD2};
+                selection-background-color: {_ACCENT_DIM};
+            }}
+        """)
+        self._mic_combo.setEnabled(bool(self._mic_devices))
+        self._mic_combo.currentIndexChanged.connect(self._on_mic_device_changed)
+        dl.addWidget(dev_lbl)
+        dl.addWidget(self._mic_combo, stretch=1)
+        src_layout.addWidget(device_row)
 
         layout.addWidget(sources_sec)
         layout.addWidget(self._vsep())
@@ -461,7 +518,7 @@ class SmartRecorderApp(QMainWindow):
         def _open_folder():
             proj = self._filters.get("project")
             path = os.path.join(FOLDER, proj) if proj else FOLDER
-            subprocess.Popen(["explorer", path])
+            subprocess.Popen(["explorer", path], **_SUBPROCESS_FLAGS)
         open_btn.clicked.connect(_open_folder)
         hl.addWidget(open_btn)
         layout.addWidget(hdr)
@@ -635,6 +692,21 @@ class SmartRecorderApp(QMainWindow):
         self._app_on = not self._app_on
         self._style_source_btn(self._app_btn, self._app_on)
 
+    def _default_mic_combo_index(self) -> int:
+        """Return the combo index matching the auto-detect preference (Microphone Array first)."""
+        for i, (_, name) in enumerate(self._mic_devices):
+            if "Microphone Array" in name:
+                return i
+        return 0
+
+    def _on_mic_device_changed(self, combo_idx: int):
+        if not self._mic_devices:
+            return
+        self._recorder.mic_device_index = self._mic_devices[combo_idx][0]
+        if not self._recording:
+            self._stop_monitor()
+            self._start_monitor()
+
     # ── Level monitor ──────────────────────────────────────────────────────
 
     def _start_monitor(self):
@@ -666,6 +738,7 @@ class SmartRecorderApp(QMainWindow):
         self._pulse_timer.start()
         self._mic_btn.setEnabled(False)
         self._app_btn.setEnabled(False)
+        self._mic_combo.setEnabled(False)
         self._status_dot.setStyleSheet(f"font-size: 7px; color: {_REC}; background: transparent;")
         self._status_label.setStyleSheet(f"font-size: 11px; color: {_REC}; background: transparent;")
         self._status_label.setText("Recording")
@@ -680,7 +753,7 @@ class SmartRecorderApp(QMainWindow):
         }[(mic, app)]
         threading.Thread(target=target, daemon=True).start()
 
-    def _on_done(self, meta: dict | None):
+    def _on_done(self, meta: dict | None, reason: str | None = None):
         self._recording = False
         self._record_start = None
         self._pulse_timer.stop()
@@ -688,6 +761,7 @@ class SmartRecorderApp(QMainWindow):
         self._set_record_btn_style(recording=False)
         self._mic_btn.setEnabled(True)
         self._app_btn.setEnabled(True)
+        self._mic_combo.setEnabled(bool(self._mic_devices))
         self._status_dot.setStyleSheet(f"font-size: 7px; color: {_T3}; background: transparent;")
         self._status_label.setStyleSheet(f"font-size: 11px; color: {_T3}; background: transparent;")
         self._status_label.setText("Ready")
@@ -707,7 +781,17 @@ class SmartRecorderApp(QMainWindow):
                 on_done=lambda rid, text, lang: self._sig_transcribed.emit(rid, text, lang),
             )
         else:
-            self._log("Recording stopped — no audio captured")
+            msg = {
+                "loopback_device_missing": "No WASAPI loopback device found — system audio unavailable",
+                "mic_device_error": "Microphone not found or unavailable",
+                "mic_stream_error": "Microphone stream failed to open",
+                "mic_no_chunks": "Microphone captured no audio",
+                "loopback_no_chunks": "Loopback captured no audio",
+                "loopback_stream_error": "Loopback stream failed to open",
+                "stream_open_error": "Audio stream failed to open",
+                "both_no_chunks": "No audio captured from mic or system",
+            }.get(reason or "", "Recording stopped — no audio captured")
+            self._log(msg)
 
     def _on_transcribed(self, rec_id: int, text: str | None, language: str):
         self._transcribing.discard(rec_id)
@@ -794,6 +878,60 @@ class SmartRecorderApp(QMainWindow):
 
         self._refresh_project_combo()
         self._rebuild_list()
+
+    def _import_recording(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Import Recording", "",
+            "Audio Files (*.wav *.mp3 *.m4a *.mp4 *.ogg *.flac *.aac *.wma *.opus);;All Files (*)",
+        )
+        if not filepath:
+            return
+
+        recordings_dir = os.path.join(FOLDER, "recordings")
+        os.makedirs(recordings_dir, exist_ok=True)
+
+        stem = os.path.splitext(os.path.basename(filepath))[0]
+        dst_path = os.path.join(recordings_dir, f"{stem}.wav")
+        if os.path.exists(dst_path):
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            dst_path = os.path.join(recordings_dir, f"{stem}_{ts}.wav")
+
+        src_ext = os.path.splitext(filepath)[1].lower()
+        if src_ext == ".wav":
+            shutil.copy2(filepath, dst_path)
+        else:
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-i", filepath, "-ar", "44100", "-ac", "1", dst_path],
+                capture_output=True,
+                **_SUBPROCESS_FLAGS,
+            )
+            if result.returncode != 0:
+                QMessageBox.critical(
+                    self, "Import Failed",
+                    f"ffmpeg could not convert the file:\n{result.stderr.decode(errors='replace')}",
+                )
+                return
+
+        with wave.open(dst_path, "rb") as wf:
+            rate = wf.getframerate()
+            channels = wf.getnchannels()
+            duration = wf.getnframes() / rate
+
+        now = datetime.datetime.now()
+        meta = save_metadata(dst_path, "imported", now, now + datetime.timedelta(seconds=duration), rate, channels)
+
+        self._recordings.insert(0, meta)
+        self._transcribing.add(meta["id"])
+        self._refresh_project_combo()
+        self._rebuild_list()
+        self._log(f"Imported  {os.path.basename(dst_path)}")
+        self._log(f"Transcribing…  {os.path.basename(dst_path)}")
+        self._import_file_lbl.setText(os.path.basename(filepath))
+        self._transcriber.transcribe_async(
+            meta["id"],
+            dst_path,
+            on_done=lambda rid, text, lang: self._sig_transcribed.emit(rid, text, lang),
+        )
 
     def _unique_projects(self) -> list[str]:
         seen: list[str] = []
@@ -913,51 +1051,6 @@ class SmartRecorderApp(QMainWindow):
             )
         return btn
 
-    def _make_tx_process_btn(self, rec_id: int, filepath: str, file_missing: bool, has_transcript_x: bool) -> QPushButton:
-        processing = rec_id in self._transcribing_x
-        btn = QPushButton("···" if processing else "⟳X")
-        btn.setFixedSize(30, 22)
-        if processing:
-            btn.setEnabled(False)
-            btn.setStyleSheet(
-                "QPushButton { background: #0f1a28; color: #3a5070;"
-                " border: 1px solid #1e3040; border-radius: 4px; font-size: 9px; }"
-            )
-        elif file_missing and not has_transcript_x:
-            btn.setEnabled(False)
-            btn.setToolTip("Audio file not found — cannot run WhisperX")
-            btn.setStyleSheet(
-                "QPushButton { background: transparent; color: #1e1a2e;"
-                " border: 1px solid #151520; border-radius: 4px; font-size: 9px; font-weight: 700; }"
-            )
-        else:
-            btn.setToolTip("Run WhisperX transcription with speaker diarization")
-            btn.setStyleSheet(
-                "QPushButton { background: transparent; color: #4c1d95;"
-                " border: 1px solid #2e1060; border-radius: 4px; font-size: 9px; font-weight: 700; }"
-                " QPushButton:hover { background: #1a0f36; color: #a78bfa; }"
-            )
-            btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._retranscribe_x(rid, p))
-        return btn
-
-    def _make_tx_view_btn(self, rec_id: int, filepath: str, has_transcript_x: bool) -> QPushButton:
-        btn = QPushButton("TX")
-        btn.setFixedSize(30, 22)
-        if has_transcript_x:
-            btn.setStyleSheet(
-                "QPushButton { background: #271740; color: #a78bfa;"
-                " border: 1px solid #4c1d95; border-radius: 4px; font-size: 10px; font-weight: 700; }"
-                " QPushButton:hover { background: #3d1a6e; }"
-            )
-            btn.clicked.connect(lambda _=False, rid=rec_id, p=filepath: self._view_transcript_x(rid, p))
-        else:
-            btn.setEnabled(False)
-            btn.setStyleSheet(
-                "QPushButton { background: transparent; color: #1e1a2e;"
-                " border: 1px solid #151520; border-radius: 4px; font-size: 10px; font-weight: 700; }"
-            )
-        return btn
-
     def _make_row(self, rec: dict) -> RecordingRow:
         row = RecordingRow()
         row.setFixedHeight(52)
@@ -1052,11 +1145,8 @@ class SmartRecorderApp(QMainWindow):
         # ── Transcript + Summary: run/view buttons ────────────────────────
         has_transcript   = rec.get("has_transcript", False)
         has_summary      = rec.get("has_summary", False)
-        has_transcript_x = rec.get("has_transcript_x", False)
         layout.addWidget(self._make_process_btn(rec_id, filepath, file_missing, has_transcript))
         layout.addWidget(self._make_t_view_btn(rec_id, filepath, has_transcript))
-        layout.addWidget(self._make_tx_process_btn(rec_id, filepath, file_missing, has_transcript_x))
-        layout.addWidget(self._make_tx_view_btn(rec_id, filepath, has_transcript_x))
         layout.addWidget(self._make_s_view_btn(rec_id, filepath, has_summary))
 
         # Info
@@ -1206,7 +1296,6 @@ class SmartRecorderApp(QMainWindow):
                 self._log(f"Warning: could not delete {os.path.basename(rec['filepath'])}: {exc}")
             self._log(f"Deleted  {os.path.basename(rec['filepath'])}")
         self._transcribing.discard(rec["id"])
-        self._transcribing_x.discard(rec["id"])
         if rec in self._recordings:
             self._recordings.remove(rec)
         self._refresh_project_combo()
@@ -1221,6 +1310,7 @@ class SmartRecorderApp(QMainWindow):
                 ["powershell", "-c",
                  f'(New-Object System.Media.SoundPlayer "{filepath}").PlaySync()'],
                 check=False,
+                **_SUBPROCESS_FLAGS,
             ),
             daemon=True,
         ).start()
@@ -1371,36 +1461,6 @@ class SmartRecorderApp(QMainWindow):
             on_done=lambda rid, s: self._sig_summarized.emit(rid, s),
         )
 
-    def _retranscribe_x(self, rec_id: int, filepath: str):
-        if rec_id in self._transcribing_x:
-            return
-        if not os.path.exists(filepath):
-            self._log(f"File not found — cannot run WhisperX  {os.path.basename(filepath)}")
-            return
-        self._transcribing_x.add(rec_id)
-        self._rebuild_list()
-        self._log(f"WhisperX transcribing…  {os.path.basename(filepath)}")
-        self._transcriber_x.transcribe_async(
-            rec_id,
-            filepath,
-            on_done=lambda rid, text: self._sig_transcribed_x.emit(rid, text),
-        )
-
-    def _on_transcribed_x(self, rec_id: int, text: str | None):
-        self._transcribing_x.discard(rec_id)
-        filepath = None
-        for rec in self._recordings:
-            if rec["id"] == rec_id:
-                rec["has_transcript_x"] = text is not None
-                filepath = rec["filepath"]
-                break
-        name = os.path.basename(filepath) if filepath else str(rec_id)
-        if text is not None:
-            self._log(f"WhisperX transcript ready  {name}")
-        else:
-            self._log(f"WhisperX failed  {name}  (check HF_TOKEN and that whisperx is installed)")
-        self._rebuild_list()
-
     def _view_info(self, rec_id: int, filepath: str):
         dlg = QDialog(self)
         dlg.setWindowTitle("Recording Info")
@@ -1429,39 +1489,3 @@ class SmartRecorderApp(QMainWindow):
         layout.addRow(_key("Path"), _val(filepath))
         dlg.exec()
 
-    def _view_transcript_x(self, rec_id: int, filepath: str):
-        transcript_x = get_transcript_x(rec_id)
-        if transcript_x is None:
-            return
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"WhisperX — {_format_name(filepath)}")
-        dlg.resize(560, 520)
-        dlg.setModal(True)
-        dlg.setStyleSheet(f"""
-            QDialog {{ background: {_CARD}; }}
-            QWidget {{ background: {_CARD}; color: {_T1}; }}
-        """)
-
-        layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        hdr = QLabel("WHISPERX TRANSCRIPT  ·  SPEAKERS")
-        hdr.setStyleSheet(
-            "font-size: 10px; font-weight: 600; letter-spacing: 1px; "
-            "color: #a78bfa; background: transparent;"
-        )
-        layout.addWidget(hdr)
-
-        txt = QPlainTextEdit(transcript_x)
-        txt.setReadOnly(True)
-        txt.setStyleSheet("""
-            QPlainTextEdit {
-                background: #0f0a1e; color: #e2d9f3;
-                border: 1px solid #2e1a5c; border-radius: 6px;
-                font-size: 13px; padding: 10px;
-            }
-        """)
-        layout.addWidget(txt, stretch=1)
-        dlg.exec()

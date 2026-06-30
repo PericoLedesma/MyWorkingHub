@@ -16,7 +16,7 @@ def _txt_path(wav_path: str) -> str:
     return os.path.splitext(wav_path)[0] + ".txt"
 
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 
 def _init():
@@ -70,14 +70,6 @@ def _init():
                 pass
             conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
 
-        if db_version < 3:
-            log.info("Migrating schema to v3 (transcript_x column)")
-            try:
-                conn.execute("ALTER TABLE recordings ADD COLUMN transcript_x TEXT")
-            except sqlite3.OperationalError:
-                pass
-            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
-
         if db_version < 4:
             log.info("Migrating schema to v4 (language column)")
             try:
@@ -92,6 +84,20 @@ def _init():
                 conn.execute("ALTER TABLE recordings ADD COLUMN transcript_raw TEXT")
             except sqlite3.OperationalError:
                 pass
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
+
+        if db_version < 6:
+            log.info("Migrating schema to v6 (speaker diarization columns)")
+            for col_def in (
+                "ALTER TABLE recordings ADD COLUMN whisper_segments TEXT",
+                "ALTER TABLE recordings ADD COLUMN whisper_segments_assigned TEXT",
+                "ALTER TABLE recordings ADD COLUMN transcript_speaker TEXT",
+                "ALTER TABLE recordings ADD COLUMN speaker_names TEXT",
+            ):
+                try:
+                    conn.execute(col_def)
+                except sqlite3.OperationalError:
+                    pass
             conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
 
         # Migrate any existing .txt sidecar files into the DB
@@ -197,32 +203,76 @@ def get_language(recording_id: int) -> str | None:
     return row[0] if row else None
 
 
-def save_transcript_x(recording_id: int, text: str) -> None:
-    """Persist the WhisperX diarized transcript for a recording."""
-    log.info("save_transcript_x  chars=%d  id=%d", len(text), recording_id)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "UPDATE recordings SET transcript_x = ? WHERE id = ?",
-            (text, recording_id),
-        )
-
-
-def get_transcript_x(recording_id: int) -> str | None:
-    """Return the WhisperX diarized transcript, or None if not yet generated."""
-    log.debug("get_transcript_x  id=%d", recording_id)
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT transcript_x FROM recordings WHERE id = ?", (recording_id,)
-        ).fetchone()
-    return row[0] if row else None
-
-
 def get_summary(recording_id: int) -> str | None:
     """Return the stored summary for a recording, or None if not yet generated."""
     log.debug("get_summary  id=%d", recording_id)
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT summary FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def save_whisper_segments(recording_id: int, segments_json: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET whisper_segments = ? WHERE id = ?",
+            (segments_json, recording_id),
+        )
+
+
+def get_whisper_segments(recording_id: int) -> str | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT whisper_segments FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def save_whisper_segments_assigned(recording_id: int, segments_json: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET whisper_segments_assigned = ? WHERE id = ?",
+            (segments_json, recording_id),
+        )
+
+
+def get_whisper_segments_assigned(recording_id: int) -> str | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT whisper_segments_assigned FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def save_transcript_speaker(recording_id: int, text: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET transcript_speaker = ? WHERE id = ?",
+            (text, recording_id),
+        )
+
+
+def get_transcript_speaker(recording_id: int) -> str | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT transcript_speaker FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def save_speaker_names(recording_id: int, names_json: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET speaker_names = ? WHERE id = ?",
+            (names_json, recording_id),
+        )
+
+
+def get_speaker_names(recording_id: int) -> str | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT speaker_names FROM recordings WHERE id = ?", (recording_id,)
         ).fetchone()
     return row[0] if row else None
 
@@ -263,7 +313,7 @@ def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
         "file_size": file_size,
         "has_transcript": False,
         "has_summary": False,
-        "has_transcript_x": False,
+        "has_speaker": False,
         "project": "",
         "meeting": "",
         "language": "",
@@ -297,8 +347,8 @@ def load_metadata(folder: str) -> list[dict]:
             "SELECT id, filepath, source, start_time, end_time, duration, sample_rate, channels, file_size, "
             "(transcript IS NOT NULL) as has_transcript, project, meeting, "
             "(summary IS NOT NULL) as has_summary, "
-            "(transcript_x IS NOT NULL) as has_transcript_x, "
-            "language "
+            "language, "
+            "(transcript_speaker IS NOT NULL) as has_speaker "
             "FROM recordings ORDER BY start_time DESC"
         ).fetchall()
 
@@ -315,7 +365,7 @@ def load_metadata(folder: str) -> list[dict]:
     recs = []
     missing_count = 0
     for row in rows:
-        row_id, fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, has_summary, has_transcript_x, language = row
+        row_id, fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, has_summary, language, has_speaker = row
         file_missing = False
         if not os.path.exists(fp):
             basename = os.path.basename(fp)
@@ -339,7 +389,7 @@ def load_metadata(folder: str) -> list[dict]:
             "file_size": fsize,
             "has_transcript": bool(has_transcript),
             "has_summary": bool(has_summary),
-            "has_transcript_x": bool(has_transcript_x),
+            "has_speaker": bool(has_speaker),
             "project": project or "",
             "meeting": meeting or "",
             "language": language or "",

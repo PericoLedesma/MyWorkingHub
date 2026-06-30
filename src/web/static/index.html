@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SmartRecorder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<div id="root">
+
+  <!-- ── Toolbar ─────────────────────────────────────────── -->
+  <div id="toolbar">
+    <div class="toolbar-group">
+      <span class="brand">🎙 SmartRecorder</span>
+    </div>
+
+    <div class="toolbar-sep"></div>
+
+    <div class="toolbar-group">
+      <button class="src-btn" id="src-mic"  onclick="setSource('mic')">Mic</button>
+      <button class="src-btn" id="src-app"  onclick="setSource('app')">App</button>
+      <button class="src-btn active" id="src-both" onclick="setSource('both')">Both</button>
+      <select id="device-select" title="Microphone device"></select>
+    </div>
+
+    <div class="toolbar-sep"></div>
+
+    <div class="toolbar-group">
+      <button id="record-btn" class="idle" onclick="toggleRecord()">
+        <span class="dot"></span>
+        <span id="record-label">Record</span>
+      </button>
+      <span id="timer">00:00</span>
+    </div>
+
+    <div class="toolbar-sep"></div>
+
+    <div class="toolbar-group">
+      <div class="vu-wrap">
+        <div class="vu-row">
+          <span class="vu-label">MIC</span>
+          <canvas id="vu-mic" width="160" height="10" style="border-radius:3px;display:block;"></canvas>
+        </div>
+        <div class="vu-row">
+          <span class="vu-label">APP</span>
+          <canvas id="vu-app" width="160" height="10" style="border-radius:3px;display:block;"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Main ────────────────────────────────────────────── -->
+  <div id="main">
+
+    <!-- Recordings panel -->
+    <div id="recordings-panel">
+      <div id="filter-bar">
+        <select id="project-filter" onchange="filterRecordings()">
+          <option value="">All projects</option>
+        </select>
+        <input id="search-input" type="text" placeholder="Search…" oninput="filterRecordings()" />
+        <button class="import-btn" onclick="document.getElementById('import-file-input').click()">
+          ↑ Import
+        </button>
+        <input id="import-file-input" type="file" accept=".wav,.mp3,.m4a,.mp4,.ogg,.flac"
+               onchange="importFile(this)" />
+      </div>
+      <div id="rec-list">
+        <div class="empty-state"><p>Loading…</p></div>
+      </div>
+    </div>
+
+    <!-- Resize handle -->
+    <div id="resize-handle"></div>
+
+    <!-- Chat panel -->
+    <div id="chat-panel">
+      <div id="chat-header">
+        <span class="chat-dot"></span>
+        AI Assistant
+      </div>
+      <div id="chat-messages"></div>
+      <div id="chat-input-row">
+        <textarea id="chat-input" placeholder="Ask about your recordings…"
+                  onkeydown="onChatKey(event)"></textarea>
+        <button id="chat-send" onclick="sendChatMessage()">Send</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Transcript modal ─────────────────────────────────── -->
+<dialog id="transcript-modal">
+  <div class="modal-header">
+    <h2 id="modal-title">Transcript</h2>
+    <button class="modal-close" onclick="document.getElementById('transcript-modal').close()">✕</button>
+  </div>
+  <div class="modal-body">
+    <div id="modal-summary-section" style="display:none">
+      <div class="pane-label">Summary</div>
+      <div class="modal-summary" id="modal-summary-text"></div>
+    </div>
+    <div class="modal-tabs">
+      <button class="tab-btn active" onclick="showTab('corrected',this)">Corrected</button>
+      <button class="tab-btn" onclick="showTab('raw',this)">Raw Whisper</button>
+    </div>
+    <div class="transcript-panes" id="modal-panes">
+      <div class="transcript-pane" id="pane-corrected">
+        <div class="pane-label">Corrected</div>
+        <div class="pane-text" id="modal-corrected"></div>
+      </div>
+      <div class="transcript-pane" id="pane-raw">
+        <div class="pane-label">Raw (Whisper)</div>
+        <div class="pane-text" id="modal-raw"></div>
+      </div>
+    </div>
+  </div>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>

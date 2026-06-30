@@ -19,4 +19,4 @@ if (-not (Test-Path $venv)) {
 }
 
 & $venv
-python (Join-Path $PSScriptRoot "main.py")
+pythonw (Join-Path $PSScriptRoot "main.py")

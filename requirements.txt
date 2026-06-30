@@ -4,4 +4,6 @@ pyaudiowpatch
 soundfile
 scipy
 openai
-whisperx
+fastapi
+uvicorn[standard]
+python-multipart

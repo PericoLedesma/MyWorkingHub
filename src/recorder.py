@@ -14,6 +14,19 @@ os.makedirs(FOLDER, exist_ok=True)
 MIC_RATE = 44100
 
 
+def list_input_devices() -> list[tuple[int, str]]:
+    """Return (device_index, name) for every available input device."""
+    pa = pyaudio.PyAudio()
+    try:
+        return [
+            (i, pa.get_device_info_by_index(i)["name"])
+            for i in range(pa.get_device_count())
+            if pa.get_device_info_by_index(i)["maxInputChannels"] > 0
+        ]
+    finally:
+        pa.terminate()
+
+
 def _rms_level(chunk: np.ndarray) -> float:
     """Return RMS amplitude of the chunk, scaled to [0, 1]."""
     # scaled by 10 so typical speech sits in a visible range on the meter
@@ -58,7 +71,8 @@ class Recorder:
         self._stop = stop_event
         self._set_mic_level = set_mic_level
         self._set_app_level = set_app_level
-        self._on_done = on_done
+        self._on_done = on_done  # signature: (meta | None, reason: str | None)
+        self.mic_device_index: int | None = None
 
     def _get_loopback(self, pa: pyaudio.PyAudio) -> dict | None:
         """Return the WASAPI loopback device that mirrors the default system output."""
@@ -74,7 +88,9 @@ class Recorder:
             return None
 
     def _get_mic_device(self, pa: pyaudio.PyAudio) -> dict:
-        """Return mic device info, preferring 'Microphone Array' by name."""
+        """Return mic device info; uses mic_device_index when set, otherwise auto-detects."""
+        if self.mic_device_index is not None:
+            return pa.get_device_info_by_index(self.mic_device_index)
         count = pa.get_device_count()
         for i in range(count):
             info = pa.get_device_info_by_index(i)
@@ -89,7 +105,7 @@ class Recorder:
             mic_info = self._get_mic_device(pa)
         except Exception:
             pa.terminate()
-            self._on_done(None)
+            self._on_done(None, "mic_device_error")
             return
 
         rate = int(mic_info["defaultSampleRate"])
@@ -118,7 +134,7 @@ class Recorder:
             stream.stop_stream()
             stream.close()
         except Exception:
-            self._on_done(None)
+            self._on_done(None, "mic_stream_error")
             return
         finally:
             pa.terminate()
@@ -126,9 +142,9 @@ class Recorder:
         end_time = datetime.datetime.now()
         if chunks:
             sf.write(filepath, np.concatenate(chunks), rate)
-            self._on_done(save_metadata(filepath, "mic", start_time, end_time, rate, 1))
+            self._on_done(save_metadata(filepath, "mic", start_time, end_time, rate, 1), None)
         else:
-            self._on_done(None)
+            self._on_done(None, "mic_no_chunks")
 
     def run_loopback(self):
         """Record WASAPI loopback (system audio) until stop_event is set."""
@@ -136,7 +152,7 @@ class Recorder:
         device = self._get_loopback(pa)
         if device is None:
             pa.terminate()
-            self._on_done(None)
+            self._on_done(None, "loopback_device_missing")
             return
 
         # use the device's native rate/channels to avoid quality loss
@@ -165,15 +181,18 @@ class Recorder:
             self._stop.wait()
             stream.stop_stream()
             stream.close()
+        except Exception:
+            self._on_done(None, "loopback_stream_error")
+            return
         finally:
             pa.terminate()
 
         end_time = datetime.datetime.now()
         if chunks:
             sf.write(filepath, np.concatenate(chunks).reshape(-1, channels), rate)
-            self._on_done(save_metadata(filepath, "app", start_time, end_time, rate, channels))
+            self._on_done(save_metadata(filepath, "app", start_time, end_time, rate, channels), None)
         else:
-            self._on_done(None)
+            self._on_done(None, "loopback_no_chunks")
 
     def run_both(self):
         """Record mic + loopback simultaneously and mix them into one file."""
@@ -181,14 +200,14 @@ class Recorder:
         device = self._get_loopback(pa)
         if device is None:
             pa.terminate()
-            self._on_done(None)
+            self._on_done(None, "loopback_device_missing")
             return
 
         try:
             mic_info = self._get_mic_device(pa)
         except Exception:
             pa.terminate()
-            self._on_done(None)
+            self._on_done(None, "mic_device_error")
             return
 
         app_rate     = int(device["defaultSampleRate"])
@@ -243,7 +262,7 @@ class Recorder:
             mic_stream.close()
             app_stream.close()
         except Exception:
-            self._on_done(None)
+            self._on_done(None, "stream_open_error")
             return
         finally:
             pa.terminate()
@@ -252,9 +271,15 @@ class Recorder:
         if mic_chunks and app_chunks:
             mixed, rate = _mix_audio(mic_chunks, app_chunks, app_rate, app_channels, mic_rate)
             sf.write(filepath, mixed, rate)
-            self._on_done(save_metadata(filepath, "both", start_time, end_time, rate, app_channels))
+            self._on_done(save_metadata(filepath, "both", start_time, end_time, rate, app_channels), None)
+        elif mic_chunks:
+            sf.write(filepath, np.concatenate(mic_chunks), mic_rate)
+            self._on_done(save_metadata(filepath, "mic", start_time, end_time, mic_rate, 1), None)
+        elif app_chunks:
+            sf.write(filepath, np.concatenate(app_chunks).reshape(-1, app_channels), app_rate)
+            self._on_done(save_metadata(filepath, "app", start_time, end_time, app_rate, app_channels), None)
         else:
-            self._on_done(None)
+            self._on_done(None, "both_no_chunks")
 
     def monitor(self, stop: threading.Event):
         """Open mic + loopback streams for level monitoring only (no saving)."""
