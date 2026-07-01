@@ -7,3 +7,4 @@ openai
 fastapi
 uvicorn[standard]
 python-multipart
+faster-whisper

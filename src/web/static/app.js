@@ -19,7 +19,89 @@ const S = {
   dispApp:         0,
   chatBubble:      null,     // current streaming assistant bubble
   pendingJobs:     {},       // {id: Set<'transcribe'|'summarize'>}
+  expandedCardId:  null,     // id of currently expanded card, or null
 };
+
+// ── Page navigation ───────────────────────────────────────────────────────────
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => { p.style.display = 'none'; });
+  document.getElementById('page-' + name).style.display = '';
+  document.querySelectorAll('.nav-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.page === name);
+  });
+  if (name === 'history') renderHistoryBar();
+}
+
+
+function renderHistoryBar() {
+  const bar = document.getElementById('history-tl-bar');
+  if (!bar) return;
+
+  const recs = [...S.recordings].sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''));
+  if (!recs.length) { bar.innerHTML = ''; return; }
+
+  const byMonth = {};
+  recs.forEach(r => {
+    const d = new Date(r.start_time || '');
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    if (!byMonth[key]) byMonth[key] = [];
+    byMonth[key].push(r);
+  });
+
+  const inner = document.createElement('div');
+  inner.className = 'htl-inner';
+
+  const track = document.createElement('div');
+  track.className = 'htl-track';
+  inner.appendChild(track);
+
+  Object.entries(byMonth).forEach(([monthKey, monthRecs], mi) => {
+    const [year, month] = monthKey.split('-');
+    const monthLabel = new Date(+year, +month - 1, 1).toLocaleDateString(undefined, { month: 'short', year: 'numeric' });
+
+    if (mi > 0) {
+      const sep = document.createElement('div');
+      sep.className = 'htl-month-sep';
+      inner.appendChild(sep);
+    }
+
+    const group = document.createElement('div');
+    group.className = 'htl-day-group';
+
+    const dotsRow = document.createElement('div');
+    dotsRow.className = 'htl-dots';
+
+    monthRecs.forEach(r => {
+      const color = projectColor(r.project) || '#3a3a44';
+      const dot = document.createElement('div');
+      dot.className = 'htl-dot';
+      dot.style.background = color;
+      dot.title = [fmtDateOnly(r.start_time), fmtTimeOnly(r.start_time), r.meeting || r.project || 'Untitled'].filter(Boolean).join(' · ');
+      dot.onclick = () => scrollToCard(r.id);
+      dotsRow.appendChild(dot);
+    });
+
+    const lbl = document.createElement('div');
+    lbl.className = 'htl-day-label';
+    lbl.textContent = monthLabel;
+
+    group.appendChild(dotsRow);
+    group.appendChild(lbl);
+    inner.appendChild(group);
+  });
+
+  bar.innerHTML = '';
+  bar.appendChild(inner);
+}
+
+function scrollToCard(id) {
+  if (document.getElementById('page-history').style.display === 'none') showPage('history');
+  const card = document.querySelector(`.rec-card[data-id="${id}"]`);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card.classList.add('highlight');
+  setTimeout(() => card.classList.remove('highlight'), 1500);
+}
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 function esc(s) {
@@ -39,6 +121,34 @@ function fmtDate(iso) {
   return d.toLocaleString(undefined, {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
   });
+}
+
+function fmtDateOnly(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function fmtTimeOnly(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+const PROJECT_PALETTE = [
+  '#f472b6','#fb923c','#fbbf24','#a3e635',
+  '#2dd4bf','#38bdf8','#a78bfa','#e879f9',
+  '#34d399','#f87171'
+];
+function projectColor(name) {
+  if (!name) return null;
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  return PROJECT_PALETTE[h % PROJECT_PALETTE.length];
+}
+function hexAlpha(hex, a) {
+  const r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  return `rgba(${r},${g},${b},${a})`;
 }
 
 function srcLabel(s) {
@@ -109,6 +219,7 @@ function onWsMessage(msg) {
         S.recordings.unshift(msg.meta);
         filterRecordings();
         updateProjectFilter();
+        renderHistoryBar();
       }
       break;
 
@@ -132,6 +243,7 @@ function onWsMessage(msg) {
         S.recordings.unshift(msg.meta);
         filterRecordings();
         updateProjectFilter();
+        renderHistoryBar();
       }
       break;
   }
@@ -308,33 +420,73 @@ async function loadRecordings() {
   S.recordings = list;
   updateProjectFilter();
   filterRecordings();
+  renderHistoryBar();
 }
 
 function updateProjectFilter() {
   const projects = [...new Set(S.recordings.map(r => r.project).filter(Boolean))].sort();
-  const sel = document.getElementById('project-filter');
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">All projects</option>';
+  const container = document.getElementById('project-bubbles');
+  const active = new Set(
+    [...container.querySelectorAll('.proj-bubble.active')].map(b => b.dataset.project)
+  );
+  container.innerHTML = '';
   projects.forEach(p => {
-    const opt = document.createElement('option');
-    opt.value = p; opt.textContent = p;
-    if (p === cur) opt.selected = true;
-    sel.appendChild(opt);
+    const b = document.createElement('button');
+    const isActive = active.has(p);
+    b.className = 'proj-bubble' + (isActive ? ' active' : '');
+    b.dataset.project = p;
+    b.textContent = p;
+    const color = projectColor(p);
+    if (color) {
+      b.style.setProperty('--proj-color', color);
+      if (isActive) b.style.background = hexAlpha(color, 0.15);
+    }
+    b.onclick = () => {
+      b.classList.toggle('active');
+      if (color) b.style.background = b.classList.contains('active') ? hexAlpha(color, 0.15) : '';
+      filterRecordings();
+    };
+    container.appendChild(b);
   });
 }
 
 function filterRecordings() {
-  const proj = document.getElementById('project-filter').value.toLowerCase();
-  const q    = document.getElementById('search-input').value.toLowerCase();
+  const activeProjects = new Set(
+    [...document.querySelectorAll('#project-bubbles .proj-bubble.active')]
+      .map(b => b.dataset.project.toLowerCase())
+  );
+  const q = document.getElementById('search-input').value.toLowerCase();
   S.filtered = S.recordings.filter(r => {
-    if (proj && (r.project || '').toLowerCase() !== proj) return false;
+    if (activeProjects.size && !activeProjects.has((r.project || '').toLowerCase())) return false;
     if (q) {
       const hay = [r.project, r.meeting, r.source, r.start_time].join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   });
+  const btn = document.getElementById('clear-filter-btn');
+  if (btn) btn.style.display = (activeProjects.size || q) ? '' : 'none';
   renderList();
+}
+
+function clearFilter() {
+  document.getElementById('search-input').value = '';
+  document.querySelectorAll('#project-bubbles .proj-bubble.active').forEach(b => {
+    b.classList.remove('active');
+    b.style.background = '';
+  });
+  filterRecordings();
+}
+
+function monthKey(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return `${d.getFullYear()}-${d.getMonth()}`;
+}
+
+function monthLabel(iso) {
+  if (!iso) return '';
+  return new Date(iso).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
 }
 
 function renderList() {
@@ -343,7 +495,20 @@ function renderList() {
     el.innerHTML = '<div class="empty-state"><p>No recordings found.</p></div>';
     return;
   }
-  el.innerHTML = S.filtered.map(r => renderCard(r)).join('');
+  let html = '';
+  let lastMonth = null;
+  for (const r of S.filtered) {
+    const mk = monthKey(r.start_time);
+    if (mk !== lastMonth) {
+      if (lastMonth !== null) html += '</div>';
+      html += `<div class="month-sep" onclick="this.classList.toggle('collapsed')" data-month="${mk}"><span class="month-chevron">▾</span><span>${monthLabel(r.start_time)}</span></div><div class="month-group">`;
+      lastMonth = mk;
+    }
+    html += renderCard(r);
+  }
+  if (lastMonth !== null) html += '</div>';
+  el.innerHTML = html;
+  initAudioPlayers(el);
   // Attach tag blur listeners
   el.querySelectorAll('.tag-value').forEach(span => {
     span.addEventListener('blur', () => {
@@ -355,6 +520,11 @@ function renderList() {
       if (e.key === 'Enter') { e.preventDefault(); span.blur(); }
     });
   });
+  if (S.expandedCardId !== null) {
+    const idToExpand = S.expandedCardId;
+    S.expandedCardId = null;
+    toggleCardExpand(idToExpand);
+  }
 }
 
 function renderCard(r) {
@@ -372,37 +542,47 @@ function renderCard(r) {
                   : isSummarizing  ? 'Summarizing...' : '';
 
   const cardClass = ['rec-card', r.file_missing ? 'missing' : '', r.has_transcript ? 'has-transcript' : ''].filter(Boolean).join(' ');
+  const projColor = projectColor(r.project);
+  const cardStyle = projColor ? `style="border-left-color:${projColor}"` : '';
 
   return `
-<div class="${cardClass}" data-id="${r.id}">
-  <div class="rec-header">
-    <span class="rec-date">${esc(fmtDate(r.start_time))}</span>
-    <span class="rec-sep">·</span>
-    <span class="rec-duration">${esc(fmtDuration(r.duration))}</span>
-    <span class="rec-sep">·</span>
-    <span class="rec-source">${esc(srcLabel(r.source))}</span>
-    ${r.language ? `<span class="rec-lang">${esc(r.language)}</span>` : ''}
-    <div class="rec-badges">${badges}</div>
-  </div>
-  <div class="rec-tags">
-    <div class="tag-pair">
-      <span class="tag-label">Project</span>
-      <span class="tag-value" contenteditable="true" data-field="project" data-placeholder="--">${esc(r.project || '')}</span>
+<div class="${cardClass}" data-id="${r.id}" ${cardStyle}>
+  <div class="rec-main-row${r.has_transcript ? ' clickable' : ''}"${r.has_transcript ? ` onclick="toggleCardExpand(${r.id})"` : ''}>
+    <div class="rec-identity">
+      <div class="tag-pair">
+        <span class="tag-label">Project</span>
+        <span class="tag-value" contenteditable="true" data-field="project" data-placeholder="--" onclick="event.stopPropagation()">${esc(r.project || '')}</span>
+      </div>
+      <div class="tag-pair">
+        <span class="tag-label">Meeting</span>
+        <span class="tag-value tag-value-meeting" contenteditable="true" data-field="meeting" data-placeholder="--" onclick="event.stopPropagation()">${esc(r.meeting || '')}</span>
+      </div>
     </div>
-    <div class="tag-pair">
-      <span class="tag-label">Meeting</span>
-      <span class="tag-value" contenteditable="true" data-field="meeting" data-placeholder="--">${esc(r.meeting || '')}</span>
+    <div class="rec-meta">
+      <span class="rec-date-only">${esc(fmtDateOnly(r.start_time))}</span>
+      <span class="rec-time-only">${esc(fmtTimeOnly(r.start_time))}</span>
+      <div class="rec-meta-chips">
+        <span class="rec-duration">${esc(fmtDuration(r.duration))}</span>
+        <span class="rec-source">${esc(srcLabel(r.source))}</span>
+        ${r.language ? `<span class="rec-lang">${esc(r.language)}</span>` : ''}
+      </div>
+      <div class="rec-badges">${badges}</div>
     </div>
   </div>
   ${!r.file_missing ? `
   <div class="rec-audio-row">
-    <audio class="rec-audio" src="/audio/${r.id}" controls preload="none"></audio>
+    <audio class="rec-audio" src="/audio/${r.id}" preload="none"></audio>
+    <div class="audio-player">
+      <button class="audio-play-btn" aria-label="Play">▶</button>
+      <span class="audio-time">0:00</span>
+      <input type="range" class="audio-seek" value="0" min="0" max="100" step="0.1">
+      <span class="audio-dur">--:--</span>
+    </div>
   </div>` : `<div class="rec-status" style="color:#ef4444;margin-bottom:8px;">Audio file missing</div>`}
   <div class="rec-actions">
-    ${r.has_transcript ? `
-      <button class="act-btn primary" onclick="viewTranscript(${r.id})">View transcript</button>
-      ${!r.has_summary ? `<button class="act-btn${isSummarizing?' spinning':''}" ${isSummarizing?'disabled':''} onclick="summarize(${r.id})">Summarize</button>` : ''}
-    ` : ''}
+    ${r.has_transcript ? `<button class="act-btn primary" onclick="toggleCardExpand(${r.id})">View transcript</button>` : ''}
+    ${r.has_summary ? `<button class="act-btn primary" onclick="toggleCardExpandTab(${r.id},'summary')">View summary</button>` : ''}
+    ${r.has_transcript ? `<button class="act-btn${isSummarizing?' spinning':''}" ${isSummarizing?'disabled':''} onclick="summarize(${r.id})">${r.has_summary ? 'Re-summarize' : 'Summarize'}</button>` : ''}
     <button class="act-btn${isTranscribing?' spinning':''}" ${isTranscribing?'disabled':''} onclick="transcribe(${r.id})">
       ${r.has_transcript ? 'Re-transcribe' : 'Transcribe'}
     </button>
@@ -410,7 +590,50 @@ function renderCard(r) {
     <button class="act-btn danger" onclick="deleteRecording(${r.id})">Delete</button>
   </div>
   ${statusMsg ? `<div class="rec-status">${esc(statusMsg)}</div>` : ''}
+  <div class="rec-detail" id="rec-detail-${r.id}"></div>
 </div>`;
+}
+
+function fmtPlayerTime(s) {
+  if (!isFinite(s)) return '--:--';
+  const m = Math.floor(s / 60);
+  const ss = String(Math.floor(s % 60)).padStart(2, '0');
+  return `${m}:${ss}`;
+}
+
+function initAudioPlayers(container) {
+  container.querySelectorAll('.rec-audio-row').forEach(row => {
+    const audio = row.querySelector('.rec-audio');
+    const btn   = row.querySelector('.audio-play-btn');
+    const seek  = row.querySelector('.audio-seek');
+    const time  = row.querySelector('.audio-time');
+    const dur   = row.querySelector('.audio-dur');
+
+    btn.addEventListener('click', () => {
+      if (audio.paused) { audio.play(); btn.textContent = '⏸'; }
+      else              { audio.pause(); btn.textContent = '▶'; }
+    });
+
+    audio.addEventListener('loadedmetadata', () => {
+      seek.max = audio.duration;
+      dur.textContent = fmtPlayerTime(audio.duration);
+    });
+
+    audio.addEventListener('timeupdate', () => {
+      time.textContent = fmtPlayerTime(audio.currentTime);
+      if (!seek._seeking) seek.value = audio.currentTime;
+    });
+
+    seek.addEventListener('mousedown', () => { seek._seeking = true; });
+    seek.addEventListener('input',     () => { time.textContent = fmtPlayerTime(+seek.value); });
+    seek.addEventListener('change',    () => { audio.currentTime = +seek.value; seek._seeking = false; });
+
+    audio.addEventListener('ended', () => {
+      btn.textContent = '▶';
+      seek.value = 0;
+      time.textContent = '0:00';
+    });
+  });
 }
 
 function addJob(id, job) {
@@ -427,10 +650,16 @@ function refreshCard(id) {
   if (!card) return;
   const rec = S.recordings.find(r => r.id === id);
   if (!rec) return;
+  const wasExpanded = S.expandedCardId === id;
   card.outerHTML = renderCard(rec);
-  // Re-attach listeners for the replaced card
   const newCard = document.querySelector(`.rec-card[data-id="${id}"]`);
-  if (newCard) attachTagListeners(newCard);
+  if (newCard) {
+    attachTagListeners(newCard);
+    if (wasExpanded) {
+      S.expandedCardId = null;
+      toggleCardExpand(id);
+    }
+  }
 }
 
 async function refreshCardFromServer(id) {
@@ -439,6 +668,7 @@ async function refreshCardFromServer(id) {
   S.recordings = recs;
   filterRecordings();
   updateProjectFilter();
+  renderHistoryBar();
 }
 
 function attachTagListeners(card) {
@@ -487,44 +717,83 @@ async function saveTag(id, field, value) {
   updateProjectFilter();
 }
 
-// ── Transcript modal ──────────────────────────────────────────────────────────
-async function viewTranscript(id) {
-  const rec = S.recordings.find(r => r.id === id);
-  const data = await fetch(`/api/recordings/${id}/transcript`).then(r => r.json());
+// ── In-place transcript expand ────────────────────────────────────────────────
+async function toggleCardExpand(id) {
+  const card = document.querySelector(`.rec-card[data-id="${id}"]`);
+  if (!card) return;
 
-  document.getElementById('modal-title').textContent =
-    rec ? `Transcript — ${fmtDate(rec.start_time)}` : 'Transcript';
-
-  // Summary
-  const sumSection = document.getElementById('modal-summary-section');
-  if (data.summary) {
-    document.getElementById('modal-summary-text').textContent = data.summary;
-    sumSection.style.display = '';
-  } else {
-    sumSection.style.display = 'none';
+  // Collapse a previously expanded different card
+  if (S.expandedCardId !== null && S.expandedCardId !== id) {
+    const prev = document.querySelector(`.rec-card[data-id="${S.expandedCardId}"]`);
+    if (prev) {
+      prev.classList.remove('expanded');
+      const d = prev.querySelector('.rec-detail');
+      if (d) d.innerHTML = '';
+    }
+    S.expandedCardId = null;
   }
 
-  // Transcript panes
-  document.getElementById('modal-corrected').textContent = data.corrected || '(not available)';
-  document.getElementById('modal-raw').textContent       = data.raw       || '(not available)';
+  // Toggle current card
+  if (card.classList.contains('expanded')) {
+    card.classList.remove('expanded');
+    card.querySelector('.rec-detail').innerHTML = '';
+    S.expandedCardId = null;
+    return;
+  }
 
-  // Reset to corrected tab
-  showTab('corrected', document.querySelector('.tab-btn'));
+  const data = await fetch(`/api/recordings/${id}/transcript`).then(r => r.json());
+  card.classList.add('expanded');
+  S.expandedCardId = id;
 
-  document.getElementById('transcript-modal').showModal();
+  const detail = card.querySelector('.rec-detail');
+  detail.innerHTML = buildDetailHTML(id, data);
+  activateDetailTab(detail.querySelector('.detail-tab[data-tab="raw"]'), 'raw', id);
 }
 
-function showTab(name, btn) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  if (btn) btn.classList.add('active');
+function buildDetailHTML(id, data) {
+  return `
+    <div class="detail-tabs">
+      <button class="detail-tab active" data-tab="raw"
+              onclick="activateDetailTab(this,'raw',${id})">Raw Whisper</button>
+      <button class="detail-tab" data-tab="corrected"
+              onclick="activateDetailTab(this,'corrected',${id})">Corrected</button>
+      <button class="detail-tab" data-tab="summary"
+              onclick="activateDetailTab(this,'summary',${id})">Summary</button>
+      ${data.speaker ? `<button class="detail-tab" data-tab="speaker"
+              onclick="activateDetailTab(this,'speaker',${id})">Speaker</button>` : ''}
+    </div>
+    <div class="detail-transcript-text" data-tab="raw">${esc(data.raw || '(not available)')}</div>
+    <div class="detail-transcript-text" data-tab="corrected" style="display:none">${esc(data.corrected || '(not available)')}</div>
+    <div class="detail-transcript-text" data-tab="summary" style="display:none">${data.summary ? esc(data.summary) : '<span style="color:var(--muted)">No summary yet — click Summarize to generate one.</span>'}</div>
+    ${data.speaker ? `<div class="detail-transcript-text" data-tab="speaker" style="display:none">${esc(data.speaker)}</div>` : ''}
+  `;
+}
 
-  const panes = { corrected: '#pane-corrected', raw: '#pane-raw' };
-  Object.entries(panes).forEach(([key, sel]) => {
-    const el = document.querySelector(sel);
-    if (el) el.style.display = key === name ? '' : 'none';
+function activateDetailTab(btn, tab, id) {
+  const card = document.querySelector(`.rec-card[data-id="${id}"]`);
+  if (!card) return;
+  const detail = card.querySelector('.rec-detail');
+  detail.querySelectorAll('.detail-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  detail.querySelectorAll('.detail-transcript-text').forEach(p => {
+    p.style.display = p.dataset.tab === tab ? '' : 'none';
   });
+}
 
-  document.getElementById('modal-panes').style.gridTemplateColumns = '1fr';
+async function toggleCardExpandTab(id, tab) {
+  const card = document.querySelector(`.rec-card[data-id="${id}"]`);
+  if (card && card.classList.contains('expanded')) {
+    // Already open — just switch tab
+    const detail = card.querySelector('.rec-detail');
+    const btn = detail && detail.querySelector(`.detail-tab[data-tab="${tab}"]`);
+    if (btn) activateDetailTab(btn, tab, id);
+    return;
+  }
+  await toggleCardExpand(id);
+  // After expand, switch to the requested tab
+  const detail = document.querySelector(`.rec-card[data-id="${id}"] .rec-detail`);
+  const btn = detail && detail.querySelector(`.detail-tab[data-tab="${tab}"]`);
+  if (btn) activateDetailTab(btn, tab, id);
 }
 
 // ── Import ────────────────────────────────────────────────────────────────────

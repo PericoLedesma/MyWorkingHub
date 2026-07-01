@@ -12,115 +12,235 @@
 <body>
 <div id="root">
 
-  <!-- ── Toolbar ─────────────────────────────────────────── -->
-  <div id="toolbar">
-    <div class="toolbar-group">
-      <span class="brand">🎙 SmartRecorder</span>
-    </div>
+  <!-- ── Body: sidebar + pages ─────────────────────────────── -->
+  <div id="app-body">
 
-    <div class="toolbar-sep"></div>
-
-    <div class="toolbar-group">
-      <button class="src-btn" id="src-mic"  onclick="setSource('mic')">Mic</button>
-      <button class="src-btn" id="src-app"  onclick="setSource('app')">App</button>
-      <button class="src-btn active" id="src-both" onclick="setSource('both')">Both</button>
-      <select id="device-select" title="Microphone device"></select>
-    </div>
-
-    <div class="toolbar-sep"></div>
-
-    <div class="toolbar-group">
-      <button id="record-btn" class="idle" onclick="toggleRecord()">
-        <span class="dot"></span>
-        <span id="record-label">Record</span>
+    <nav id="sidebar">
+      <div class="sidebar-brand"><img src="/logo.png" class="sidebar-logo" alt="SmartRecorder" /> SmartRecorder</div>
+      <div class="sidebar-sep"></div>
+      <button class="nav-btn active" data-page="recordings" onclick="showPage('recordings')">
+        <span class="nav-icon">⏺</span>
+        <span class="nav-label">Recordings</span>
       </button>
-      <span id="timer">00:00</span>
-    </div>
+      <button class="nav-btn" data-page="history" onclick="showPage('history')">
+        <span class="nav-icon">📋</span>
+        <span class="nav-label">History</span>
+      </button>
+      <button class="nav-btn" data-page="guide" onclick="showPage('guide')">
+        <span class="nav-icon">📖</span>
+        <span class="nav-label">How it works</span>
+      </button>
+    </nav>
 
-    <div class="toolbar-sep"></div>
+    <div id="content">
 
-    <div class="toolbar-group">
-      <div class="vu-wrap">
-        <div class="vu-row">
-          <span class="vu-label">MIC</span>
-          <canvas id="vu-mic" width="160" height="10" style="border-radius:3px;display:block;"></canvas>
+      <!-- ── Page: Recordings ─────────────────────────────── -->
+      <div id="page-recordings" class="page">
+        <div class="rec-station">
+
+          <div class="rec-station-source">
+            <button class="src-btn" id="src-mic"  onclick="setSource('mic')">Mic</button>
+            <button class="src-btn" id="src-app"  onclick="setSource('app')">App</button>
+            <button class="src-btn active" id="src-both" onclick="setSource('both')">Both</button>
+            <select id="device-select" title="Microphone device"></select>
+          </div>
+
+          <div class="rec-station-vu">
+            <div class="vu-wrap">
+              <div class="vu-row">
+                <span class="vu-label">MIC</span>
+                <canvas id="vu-mic" width="280" height="14" style="border-radius:4px;display:block;"></canvas>
+              </div>
+              <div class="vu-row">
+                <span class="vu-label">APP</span>
+                <canvas id="vu-app" width="280" height="14" style="border-radius:4px;display:block;"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <div class="rec-station-action">
+            <button id="record-btn" class="idle" onclick="toggleRecord()">
+              <span class="dot"></span>
+              <span id="record-label">Record</span>
+            </button>
+            <span id="timer">00:00</span>
+          </div>
+
         </div>
-        <div class="vu-row">
-          <span class="vu-label">APP</span>
-          <canvas id="vu-app" width="160" height="10" style="border-radius:3px;display:block;"></canvas>
+      </div>
+
+      <!-- ── Page: History ────────────────────────────────── -->
+      <div id="page-history" class="page" style="display:none">
+        <div id="history-tl-bar"><div class="htl-inner"><div class="htl-track"></div></div></div>
+        <div id="main">
+
+          <div id="recordings-panel">
+            <div id="filter-bar">
+              <div class="filter-row-top">
+                <input id="search-input" type="text" placeholder="Search…" oninput="filterRecordings()" />
+                <button class="import-btn" onclick="document.getElementById('import-file-input').click()">
+                  ↑ Import
+                </button>
+                <input id="import-file-input" type="file" accept=".wav,.mp3,.m4a,.mp4,.ogg,.flac"
+                       onchange="importFile(this)" />
+              </div>
+              <div class="filter-row-bottom">
+                <span class="filter-label">Projects</span>
+                <div id="project-bubbles"></div>
+                <button id="clear-filter-btn" class="clear-filter-btn" onclick="clearFilter()" style="display:none">✕ Clear filter</button>
+              </div>
+            </div>
+            <div id="rec-list">
+              <div class="empty-state"><p>Loading…</p></div>
+            </div>
+          </div>
+
+          <div id="resize-handle"></div>
+
+          <div id="right-panel">
+            <div class="right-panel-header">AI Chat</div>
+            <div id="chat-panel" class="rpanel-view">
+              <div id="chat-messages"></div>
+              <div id="chat-input-row">
+                <textarea id="chat-input" placeholder="Ask about your recordings…"
+                          onkeydown="onChatKey(event)"></textarea>
+                <button id="chat-send" onclick="sendChatMessage()">Send</button>
+              </div>
+            </div>
+          </div>
+
         </div>
       </div>
-    </div>
-  </div>
 
-  <!-- ── Main ────────────────────────────────────────────── -->
-  <div id="main">
+      <!-- ── Page: How it works ──────────────────────────────── -->
+      <div id="page-guide" class="page" style="display:none">
+        <div id="guide-page">
+          <div class="guide-header">
+            <h1 class="guide-title">How SmartRecorder works</h1>
+            <p class="guide-subtitle">A step-by-step breakdown of the full pipeline</p>
+            <img src="/logo.png" class="guide-logo" alt="SmartRecorder" />
+          </div>
 
-    <!-- Recordings panel -->
-    <div id="recordings-panel">
-      <div id="filter-bar">
-        <select id="project-filter" onchange="filterRecordings()">
-          <option value="">All projects</option>
-        </select>
-        <input id="search-input" type="text" placeholder="Search…" oninput="filterRecordings()" />
-        <button class="import-btn" onclick="document.getElementById('import-file-input').click()">
-          ↑ Import
-        </button>
-        <input id="import-file-input" type="file" accept=".wav,.mp3,.m4a,.mp4,.ogg,.flac"
-               onchange="importFile(this)" />
-      </div>
-      <div id="rec-list">
-        <div class="empty-state"><p>Loading…</p></div>
-      </div>
-    </div>
+          <div class="guide-steps">
 
-    <!-- Resize handle -->
-    <div id="resize-handle"></div>
+            <div class="guide-step">
+              <div class="guide-step-num">1</div>
+              <div class="guide-step-body">
+                <div class="guide-step-title">Record audio</div>
+                <p class="guide-step-desc">
+                  Go to <strong>Recordings</strong> and choose your source — <em>Mic</em> (your microphone only),
+                  <em>App</em> (system audio only), or <em>Both</em> (default, captures everything).
+                  Hit <strong>Record</strong> to start; hit <strong>Stop</strong> when done.
+                  The file is saved locally as a <code>.wav</code> and appears instantly in History.
+                </p>
+                <div class="guide-tip">You can also import existing audio files (WAV, MP3, M4A, MP4…) via the ↑ Import button in History.</div>
+              </div>
+            </div>
 
-    <!-- Chat panel -->
-    <div id="chat-panel">
-      <div id="chat-header">
-        <span class="chat-dot"></span>
-        AI Assistant
-      </div>
-      <div id="chat-messages"></div>
-      <div id="chat-input-row">
-        <textarea id="chat-input" placeholder="Ask about your recordings…"
-                  onkeydown="onChatKey(event)"></textarea>
-        <button id="chat-send" onclick="sendChatMessage()">Send</button>
-      </div>
-    </div>
+            <div class="guide-connector"></div>
 
-  </div>
-</div>
+            <div class="guide-step">
+              <div class="guide-step-num">2</div>
+              <div class="guide-step-body">
+                <div class="guide-step-title">Transcribe <span class="guide-badge local">Local · faster-whisper</span></div>
+                <p class="guide-step-desc">
+                  Click <strong>Transcribe</strong> on any recording card.
+                  <strong>faster-whisper</strong> runs entirely on your machine — no audio ever leaves your computer.
+                  It automatically detects the language and produces a timestamped raw transcript.
+                  The first run downloads the model weights (~1.5 GB for <code>medium</code>) and caches them.
+                </p>
+                <div class="guide-tip">Change the model by setting <code>WHISPER_MODEL=large-v3</code> in your environment for higher accuracy, or <code>tiny</code> for speed.</div>
+              </div>
+            </div>
 
-<!-- ── Transcript modal ─────────────────────────────────── -->
-<dialog id="transcript-modal">
-  <div class="modal-header">
-    <h2 id="modal-title">Transcript</h2>
-    <button class="modal-close" onclick="document.getElementById('transcript-modal').close()">✕</button>
-  </div>
-  <div class="modal-body">
-    <div id="modal-summary-section" style="display:none">
-      <div class="pane-label">Summary</div>
-      <div class="modal-summary" id="modal-summary-text"></div>
-    </div>
-    <div class="modal-tabs">
-      <button class="tab-btn active" onclick="showTab('corrected',this)">Corrected</button>
-      <button class="tab-btn" onclick="showTab('raw',this)">Raw Whisper</button>
-    </div>
-    <div class="transcript-panes" id="modal-panes">
-      <div class="transcript-pane" id="pane-corrected">
-        <div class="pane-label">Corrected</div>
-        <div class="pane-text" id="modal-corrected"></div>
+            <div class="guide-connector"></div>
+
+            <div class="guide-step">
+              <div class="guide-step-num">3</div>
+              <div class="guide-step-body">
+                <div class="guide-step-title">Correction <span class="guide-badge api">API · GPT-4o-mini</span></div>
+                <p class="guide-step-desc">
+                  Right after transcription, the raw Whisper output is sent to <strong>GPT-4o-mini</strong>,
+                  which fixes only clear mishearings — wrong homophones, garbled words.
+                  It never rephrases or restructures. The result is saved as the <em>Corrected</em> transcript.
+                  You can compare both versions side-by-side in the transcript viewer.
+                </p>
+              </div>
+            </div>
+
+            <div class="guide-connector"></div>
+
+            <div class="guide-step">
+              <div class="guide-step-num">4</div>
+              <div class="guide-step-body">
+                <div class="guide-step-title">Summarize <span class="guide-badge api">API · DeepSeek</span></div>
+                <p class="guide-step-desc">
+                  Click <strong>Summarize</strong> once a transcript exists.
+                  <strong>DeepSeek</strong> reads the corrected transcript and produces a structured summary with three sections:
+                </p>
+                <ul class="guide-list">
+                  <li><strong>KEY TOPICS</strong> — main subjects discussed</li>
+                  <li><strong>DECISIONS</strong> — conclusions reached</li>
+                  <li><strong>ACTION ITEMS</strong> — next steps and owners</li>
+                </ul>
+                <div class="guide-tip">The summary language matches the recording's detected language (Spanish or English).</div>
+              </div>
+            </div>
+
+            <div class="guide-connector"></div>
+
+            <div class="guide-step">
+              <div class="guide-step-num">5</div>
+              <div class="guide-step-body">
+                <div class="guide-step-title">AI Chat <span class="guide-badge api">API · DeepSeek</span></div>
+                <p class="guide-step-desc">
+                  The <strong>AI Chat</strong> panel (right side of History) lets you ask questions across all your recordings.
+                  The assistant can search through transcripts to find relevant moments, people, decisions, or topics.
+                  It responds in Spanish by default.
+                </p>
+                <div class="guide-tip">Try asking: "What was decided about X?" or "Which meetings mentioned Y?"</div>
+              </div>
+            </div>
+
+          </div>
+
+          <div class="guide-apis">
+            <div class="guide-apis-title">Services overview</div>
+            <div class="guide-apis-grid">
+              <div class="guide-api-row">
+                <span class="guide-api-step">Transcription</span>
+                <span class="guide-api-name">faster-whisper</span>
+                <span class="guide-badge local">100% local</span>
+                <span class="guide-api-cost">Free — runs on your CPU/GPU</span>
+              </div>
+              <div class="guide-api-row">
+                <span class="guide-api-step">Correction</span>
+                <span class="guide-api-name">OpenAI GPT-4o-mini</span>
+                <span class="guide-badge api">API</span>
+                <span class="guide-api-cost">~$0.00015 / 1K tokens</span>
+              </div>
+              <div class="guide-api-row">
+                <span class="guide-api-step">Summarization</span>
+                <span class="guide-api-name">DeepSeek</span>
+                <span class="guide-badge api">API</span>
+                <span class="guide-api-cost">Very low cost</span>
+              </div>
+              <div class="guide-api-row">
+                <span class="guide-api-step">AI Chat</span>
+                <span class="guide-api-name">DeepSeek</span>
+                <span class="guide-badge api">API</span>
+                <span class="guide-api-cost">Very low cost</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
       </div>
-      <div class="transcript-pane" id="pane-raw">
-        <div class="pane-label">Raw (Whisper)</div>
-        <div class="pane-text" id="modal-raw"></div>
-      </div>
-    </div>
-  </div>
-</dialog>
+
+    </div><!-- #content -->
+  </div><!-- #app-body -->
+
+</div><!-- #root -->
 
 <script src="/app.js"></script>
 </body>
