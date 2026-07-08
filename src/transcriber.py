@@ -1,14 +1,17 @@
 import logging
+import math
 import os
+import tempfile
 import threading
 
+import scipy.io.wavfile as wav
 from openai import OpenAI
 
 from . import db
 
 log = logging.getLogger(__name__)
 
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
+MAX_CHUNK_BYTES = 24 * 1024 * 1024
 
 CORRECTION_PROMPT = (
     "You are a transcription corrector. "
@@ -24,56 +27,68 @@ CORRECTION_PROMPT = (
 )
 
 
+def _split_wav(path: str) -> list[tuple[str, float]]:
+    """Split a WAV file into <24 MB temp chunks; returns list of (temp_path, start_sec)."""
+    rate, data = wav.read(path)
+    bytes_per_sample = data.dtype.itemsize * (data.ndim if data.ndim > 1 else 1)
+    samples_per_chunk = MAX_CHUNK_BYTES // bytes_per_sample
+    total_samples = data.shape[0]
+    n_chunks = math.ceil(total_samples / samples_per_chunk)
+
+    chunks: list[tuple[str, float]] = []
+    for i in range(n_chunks):
+        start = i * samples_per_chunk
+        end = min(start + samples_per_chunk, total_samples)
+        chunk_data = data[start:end]
+        start_sec = start / rate
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        wav.write(tmp_path, rate, chunk_data)
+        chunks.append((tmp_path, start_sec))
+    return chunks
+
+
 class Transcriber:
-    """Transcribes audio locally with faster-whisper, then corrects with an LLM."""
+    """Transcribes audio with the OpenAI whisper-1 API, then corrects with an LLM."""
 
     def __init__(self):
-        self._model = None
-        self._model_lock = threading.Lock()
-        self._openai: OpenAI | None = None
+        self._client = OpenAI()
 
-    def _get_model(self):
-        if self._model is None:
-            with self._model_lock:
-                if self._model is None:
-                    from faster_whisper import WhisperModel
-                    log.info("Loading faster-whisper model '%s'…", WHISPER_MODEL)
-                    self._model = WhisperModel(
-                        WHISPER_MODEL,
-                        device="auto",
-                        compute_type="auto",
-                    )
-                    log.info("faster-whisper model ready.")
-        return self._model
-
-    def _get_openai(self) -> OpenAI:
-        if self._openai is None:
-            self._openai = OpenAI()
-        return self._openai
-
-    def transcribe_async(self, recording_id: int, filepath: str, on_done) -> None:
-        threading.Thread(
-            target=self._transcribe,
-            args=(recording_id, filepath, on_done),
-            daemon=True,
-        ).start()
-
-    def _transcribe_audio(self, filepath: str) -> tuple[str, str]:
-        model = self._get_model()
-        segments, info = model.transcribe(filepath, beam_size=5)
-
-        parts = []
-        for seg in segments:
-            h, rem = divmod(int(seg.start), 3600)
+    def _transcribe_file(self, path: str, offset_sec: float = 0.0) -> tuple[list[str], str]:
+        with open(path, "rb") as f:
+            resp = self._client.audio.transcriptions.create(
+                model="whisper-1", file=f, response_format="verbose_json"
+            )
+        parts: list[str] = []
+        for seg in resp.segments:
+            t = int(seg.start) + int(offset_sec)
+            h, rem = divmod(t, 3600)
             m, s = divmod(rem, 60)
             parts.append(f"[{h:02d}:{m:02d}:{s:02d}] {seg.text.strip()}")
+        return parts, resp.language
 
-        raw = "\n".join(parts)
-        language = info.language
-        return raw, language
+    def _transcribe_audio(self, filepath: str) -> tuple[str, str]:
+        if os.path.getsize(filepath) <= MAX_CHUNK_BYTES:
+            parts, language = self._transcribe_file(filepath)
+            return "\n".join(parts), language
+
+        chunks = _split_wav(filepath)
+        try:
+            all_parts: list[str] = []
+            language = "unknown"
+            for i, (chunk_path, start_sec) in enumerate(chunks, 1):
+                log.info("Transcribing chunk %d/%d", i, len(chunks))
+                parts, lang = self._transcribe_file(chunk_path, offset_sec=start_sec)
+                all_parts.extend(parts)
+                if i == 1:
+                    language = lang
+            return "\n".join(all_parts), language
+        finally:
+            for chunk_path, _ in chunks:
+                os.unlink(chunk_path)
 
     def _correct(self, raw_text: str) -> str:
-        response = self._get_openai().chat.completions.create(
+        response = self._client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": CORRECTION_PROMPT},
@@ -82,6 +97,13 @@ class Transcriber:
         )
         content = response.choices[0].message.content
         return content if content is not None else raw_text
+
+    def transcribe_async(self, recording_id: int, filepath: str, on_done) -> None:
+        threading.Thread(
+            target=self._transcribe,
+            args=(recording_id, filepath, on_done),
+            daemon=True,
+        ).start()
 
     def _transcribe(self, recording_id: int, filepath: str, on_done) -> None:
         try:

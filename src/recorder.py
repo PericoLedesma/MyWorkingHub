@@ -73,6 +73,18 @@ class Recorder:
         self._set_app_level = set_app_level
         self._on_done = on_done  # signature: (meta | None, reason: str | None)
         self.mic_device_index: int | None = None
+        # Live transcription buffer — drained periodically by LiveTranscriber
+        self._live_lock = threading.Lock()
+        self._live_chunks: list[np.ndarray] = []
+        self._live_rate: int = 0
+        self._live_channels: int = 1
+
+    def drain_live_chunks(self) -> tuple[list[np.ndarray], int, int]:
+        """Return (chunks_since_last_drain, rate, channels) and clear the buffer."""
+        with self._live_lock:
+            chunks = self._live_chunks[:]
+            self._live_chunks.clear()
+            return chunks, self._live_rate, self._live_channels
 
     def _get_loopback(self, pa: pyaudio.PyAudio) -> dict | None:
         """Return the WASAPI loopback device that mirrors the default system output."""
@@ -109,6 +121,8 @@ class Recorder:
             return
 
         rate = int(mic_info["defaultSampleRate"])
+        self._live_rate = rate
+        self._live_channels = 1
         start_time = datetime.datetime.now()
         filepath = _make_filepath()
         chunks: list[np.ndarray] = []
@@ -116,6 +130,8 @@ class Recorder:
         def cb(in_data, _fc, _ti, _st):
             chunk = np.frombuffer(in_data, dtype=np.float32)
             chunks.append(chunk.copy())
+            with self._live_lock:
+                self._live_chunks.append(chunk.copy())
             self._set_mic_level(_rms_level(chunk))
             self._set_app_level(0.0)
             return None, pyaudio.paContinue
@@ -157,6 +173,8 @@ class Recorder:
 
         # use the device's native rate/channels to avoid quality loss
         rate, channels = int(device["defaultSampleRate"]), device["maxInputChannels"]
+        self._live_rate = rate
+        self._live_channels = channels
         start_time = datetime.datetime.now()
         filepath = _make_filepath()
         chunks: list[np.ndarray] = []
@@ -164,6 +182,8 @@ class Recorder:
         def cb(in_data, _fc, _ti, _st):
             chunk = np.frombuffer(in_data, dtype=np.float32)
             chunks.append(chunk.copy())
+            with self._live_lock:
+                self._live_chunks.append(chunk.copy())
             self._set_mic_level(0.0)
             self._set_app_level(_rms_level(chunk))
             return None, pyaudio.paContinue
@@ -213,6 +233,8 @@ class Recorder:
         app_rate     = int(device["defaultSampleRate"])
         app_channels = device["maxInputChannels"]
         mic_rate     = int(mic_info["defaultSampleRate"])
+        self._live_rate = app_rate
+        self._live_channels = app_channels
         mic_chunks: list[np.ndarray] = []
         app_chunks: list[np.ndarray] = []
         # level vars are shared across two callbacks running on different threads
@@ -233,6 +255,8 @@ class Recorder:
             nonlocal app_lv
             chunk = np.frombuffer(in_data, dtype=np.float32)
             app_chunks.append(chunk.copy())
+            with self._live_lock:
+                self._live_chunks.append(chunk.copy())
             app_lv = _rms_level(chunk)
             self._set_app_level(app_lv)
             return None, pyaudio.paContinue

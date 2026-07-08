@@ -58,10 +58,15 @@ class SummarizationAgent(BaseAgent):
     tools = _TOOLS
 
     def __init__(self):
-        super().__init__(OpenAI(
-            api_key=os.environ.get("DEEPSEEK_API_KEY"),
-            base_url="https://api.deepseek.com",
-        ))
+        super().__init__(client=None)
+
+    def _get_client(self) -> OpenAI:
+        if self._client is None:
+            self._client = OpenAI(
+                api_key=os.environ.get("DEEPSEEK_API_KEY"),
+                base_url="https://api.deepseek.com",
+            )
+        return self._client
 
     def summarize_async(self, recording_id: int, transcript: str, language: str, on_done) -> None:
         """Trigger summarization in a background thread.

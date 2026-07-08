@@ -20,6 +20,8 @@ const S = {
   chatBubble:      null,     // current streaming assistant bubble
   pendingJobs:     {},       // {id: Set<'transcribe'|'summarize'>}
   expandedCardId:  null,     // id of currently expanded card, or null
+  nextProject:     '',       // project to apply when recording stops
+  nextMeeting:     '',       // meeting to apply when recording stops
 };
 
 // ── Page navigation ───────────────────────────────────────────────────────────
@@ -207,6 +209,12 @@ function onWsMessage(msg) {
       S.recordingStart = msg.start_time;
       updateRecordButton();
       startTimer();
+      clearLiveTranscript();
+      document.getElementById('live-transcript-panel').style.display = '';
+      break;
+
+    case 'live_transcript':
+      appendLiveTranscript(msg.timestamp, msg.text);
       break;
 
     case 'recording_stopped':
@@ -214,12 +222,20 @@ function onWsMessage(msg) {
       S.recordingStart = null;
       updateRecordButton();
       stopTimer();
+      document.getElementById('live-transcript-panel').style.display = 'none';
       if (msg.meta) {
-        // Prepend the new recording card
-        S.recordings.unshift(msg.meta);
-        filterRecordings();
-        updateProjectFilter();
-        renderHistoryBar();
+        const newRec = msg.meta;
+        S.recordings.unshift(newRec);
+        (async () => {
+          if (S.nextProject) { await saveTag(newRec.id, 'project', S.nextProject); S.nextProject = ''; }
+          if (S.nextMeeting) { await saveTag(newRec.id, 'meeting', S.nextMeeting); S.nextMeeting = ''; }
+          filterRecordings();
+          updateProjectFilter();
+          renderHistoryBar();
+          showPage('history');
+        })();
+      } else {
+        showPage('history');
       }
       break;
 
@@ -349,6 +365,10 @@ async function toggleRecord() {
   } else {
     const sel = document.getElementById('device-select');
     const deviceIndex = sel.value !== '' ? parseInt(sel.value) : null;
+    S.nextProject = document.getElementById('new-project').value.trim();
+    S.nextMeeting = document.getElementById('new-meeting').value.trim();
+    document.getElementById('new-project').value = '';
+    document.getElementById('new-meeting').value = '';
     await api('POST', '/api/record/start', {
       source: S.source,
       device_index: deviceIndex,
@@ -371,6 +391,27 @@ function startTimer() {
 function stopTimer() {
   clearInterval(S.timerInterval);
   S.timerInterval = null;
+}
+
+// ── Live transcript ───────────────────────────────────────────────────────────
+function clearLiveTranscript() {
+  document.getElementById('live-tx-body').innerHTML = '';
+}
+
+function appendLiveTranscript(timestamp, text) {
+  const body = document.getElementById('live-tx-body');
+  const line = document.createElement('div');
+  line.className = 'live-tx-line';
+  const ts = document.createElement('span');
+  ts.className = 'live-tx-ts';
+  ts.textContent = timestamp;
+  const tx = document.createElement('span');
+  tx.className = 'live-tx-text';
+  tx.textContent = ' ' + text;
+  line.appendChild(ts);
+  line.appendChild(tx);
+  body.appendChild(line);
+  body.scrollTop = body.scrollHeight;
 }
 
 // ── VU meter ──────────────────────────────────────────────────────────────────
@@ -532,65 +573,68 @@ function renderCard(r) {
   const isTranscribing = jobs.has('transcribe');
   const isSummarizing  = jobs.has('summarize');
 
-  const badges = [
-    r.has_transcript ? '<span class="badge badge-ok">Transcript</span>'
-                     : '<span class="badge badge-pending">No transcript</span>',
-    r.has_summary      ? '<span class="badge badge-ok">Summary</span>'  : '',
-  ].filter(Boolean).join('');
-
   const statusMsg = isTranscribing ? 'Transcribing...'
                   : isSummarizing  ? 'Summarizing...' : '';
 
   const cardClass = ['rec-card', r.file_missing ? 'missing' : '', r.has_transcript ? 'has-transcript' : ''].filter(Boolean).join(' ');
-  const projColor = projectColor(r.project);
-  const cardStyle = projColor ? `style="border-left-color:${projColor}"` : '';
+  const projColor  = projectColor(r.project);
+  const asideBg    = projColor ? `background:${hexAlpha(projColor, 0.28)}` : '';
+  const asideColor = projColor ? `color:${projColor}` : '';
+  const projStyle  = projColor ? `style="color:${projColor}"` : '';
 
   return `
-<div class="${cardClass}" data-id="${r.id}" ${cardStyle}>
-  <div class="rec-main-row${r.has_transcript ? ' clickable' : ''}"${r.has_transcript ? ` onclick="toggleCardExpand(${r.id})"` : ''}>
-    <div class="rec-identity">
-      <div class="tag-pair">
-        <span class="tag-label">Project</span>
-        <span class="tag-value" contenteditable="true" data-field="project" data-placeholder="--" onclick="event.stopPropagation()">${esc(r.project || '')}</span>
-      </div>
-      <div class="tag-pair">
-        <span class="tag-label">Meeting</span>
-        <span class="tag-value tag-value-meeting" contenteditable="true" data-field="meeting" data-placeholder="--" onclick="event.stopPropagation()">${esc(r.meeting || '')}</span>
-      </div>
-    </div>
-    <div class="rec-meta">
-      <span class="rec-date-only">${esc(fmtDateOnly(r.start_time))}</span>
-      <span class="rec-time-only">${esc(fmtTimeOnly(r.start_time))}</span>
-      <div class="rec-meta-chips">
-        <span class="rec-duration">${esc(fmtDuration(r.duration))}</span>
-        <span class="rec-source">${esc(srcLabel(r.source))}</span>
-        ${r.language ? `<span class="rec-lang">${esc(r.language)}</span>` : ''}
-      </div>
-      <div class="rec-badges">${badges}</div>
-    </div>
+<div class="${cardClass}" data-id="${r.id}">
+  <div class="rec-card-aside" style="${asideBg}">
+    <span class="rec-aside-label" style="${asideColor}">${esc(r.project || '·')}</span>
   </div>
-  ${!r.file_missing ? `
-  <div class="rec-audio-row">
-    <audio class="rec-audio" src="/audio/${r.id}" preload="none"></audio>
-    <div class="audio-player">
-      <button class="audio-play-btn" aria-label="Play">▶</button>
-      <span class="audio-time">0:00</span>
-      <input type="range" class="audio-seek" value="0" min="0" max="100" step="0.1">
-      <span class="audio-dur">--:--</span>
+  <div class="rec-card-content">
+    <div class="rec-main-row">
+      <div class="rec-identity">
+        <div class="tag-pair">
+          <span class="tag-label">Project</span>
+          <span class="tag-value" contenteditable="true" data-field="project" data-placeholder="--" onclick="event.stopPropagation()" ${projStyle}>${esc(r.project || '')}</span>
+        </div>
+        <div class="tag-pair">
+          <span class="tag-label">Meeting</span>
+          <span class="tag-value tag-value-meeting" contenteditable="true" data-field="meeting" data-placeholder="--" onclick="event.stopPropagation()">${esc(r.meeting || '')}</span>
+        </div>
+      </div>
+      <div class="rec-meta">
+        <div class="rec-datetime">
+          <span class="tag-label">Recorded</span>
+          <span class="rec-date-only">${esc(fmtDateOnly(r.start_time))}</span>
+          <span class="rec-time-only">${esc(fmtTimeOnly(r.start_time))}</span>
+        </div>
+        <div class="rec-meta-chips">
+          <span class="rec-duration">${esc(fmtDuration(r.duration))}</span>
+          <span class="rec-source">${esc(srcLabel(r.source))}</span>
+          ${r.language ? `<span class="rec-lang">${esc(r.language)}</span>` : ''}
+        </div>
+        <div class="rec-actions">
+          <button class="act-btn${isTranscribing?' spinning':''}" ${isTranscribing?'disabled':''} onclick="transcribe(${r.id})">${r.has_transcript ? 'Re-transcribe' : 'Transcribe'}</button>
+          ${r.has_transcript ? `<button class="act-btn${isSummarizing?' spinning':''}" ${isSummarizing?'disabled':''} onclick="summarize(${r.id})">${r.has_summary ? 'Re-summarize' : 'Summarize'}</button>` : ''}
+          <span class="act-sep"></span>
+          <button class="act-btn" onclick="openFolder(${r.id})">Open folder</button>
+          <button class="act-btn danger" onclick="deleteRecording(${r.id})">Delete</button>
+        </div>
+        ${statusMsg ? `<div class="rec-status" style="text-align:right">${esc(statusMsg)}</div>` : ''}
+      </div>
     </div>
-  </div>` : `<div class="rec-status" style="color:#ef4444;margin-bottom:8px;">Audio file missing</div>`}
-  <div class="rec-actions">
-    ${r.has_transcript ? `<button class="act-btn primary" onclick="toggleCardExpand(${r.id})">View transcript</button>` : ''}
-    ${r.has_summary ? `<button class="act-btn primary" onclick="toggleCardExpandTab(${r.id},'summary')">View summary</button>` : ''}
-    ${r.has_transcript ? `<button class="act-btn${isSummarizing?' spinning':''}" ${isSummarizing?'disabled':''} onclick="summarize(${r.id})">${r.has_summary ? 'Re-summarize' : 'Summarize'}</button>` : ''}
-    <button class="act-btn${isTranscribing?' spinning':''}" ${isTranscribing?'disabled':''} onclick="transcribe(${r.id})">
-      ${r.has_transcript ? 'Re-transcribe' : 'Transcribe'}
+    ${!r.file_missing ? `
+    <div class="rec-audio-row">
+      <audio class="rec-audio" src="/audio/${r.id}" preload="none"></audio>
+      <div class="audio-player">
+        <button class="audio-play-btn" aria-label="Play">▶</button>
+        <span class="audio-time">0:00</span>
+        <input type="range" class="audio-seek" value="0" min="0" max="100" step="0.1">
+        <span class="audio-dur">--:--</span>
+      </div>
+    </div>` : `<div class="rec-status" style="color:#ef4444;margin-bottom:8px;">Audio file missing</div>`}
+    <button class="rec-expand-btn" onclick="toggleCardExpand(${r.id})" aria-label="Expand">
+      <span class="rec-expand-chevron">▾</span>
     </button>
-    <button class="act-btn" onclick="openFolder(${r.id})">Open folder</button>
-    <button class="act-btn danger" onclick="deleteRecording(${r.id})">Delete</button>
+    <div class="rec-detail" id="rec-detail-${r.id}"></div>
   </div>
-  ${statusMsg ? `<div class="rec-status">${esc(statusMsg)}</div>` : ''}
-  <div class="rec-detail" id="rec-detail-${r.id}"></div>
 </div>`;
 }
 
@@ -715,9 +759,10 @@ async function saveTag(id, field, value) {
   const rec = S.recordings.find(r => r.id === id);
   if (rec) rec[field] = value;
   updateProjectFilter();
+  if (field === 'project') refreshCard(id);
 }
 
-// ── In-place transcript expand ────────────────────────────────────────────────
+// ── Card expand (3-tab detail panel) ─────────────────────────────────────────
 async function toggleCardExpand(id) {
   const card = document.querySelector(`.rec-card[data-id="${id}"]`);
   if (!card) return;
@@ -741,31 +786,41 @@ async function toggleCardExpand(id) {
     return;
   }
 
-  const data = await fetch(`/api/recordings/${id}/transcript`).then(r => r.json());
+  const data = await fetch(`/api/recordings/${id}/transcript`).then(r => r.json()).catch(() => ({}));
   card.classList.add('expanded');
   S.expandedCardId = id;
 
   const detail = card.querySelector('.rec-detail');
   detail.innerHTML = buildDetailHTML(id, data);
-  activateDetailTab(detail.querySelector('.detail-tab[data-tab="raw"]'), 'raw', id);
+  activateDetailTab(detail.querySelector('.detail-tab[data-tab="transcript"]'), 'transcript', id);
 }
 
 function buildDetailHTML(id, data) {
+  const hasTranscript = !!(data.raw || data.corrected);
+  const transcriptPanel = hasTranscript
+    ? `<div class="transcript-subtabs">
+        <button class="transcript-subtab active" onclick="activateSubtab(this,'raw',${id})">Raw</button>
+        ${data.corrected ? `<button class="transcript-subtab" onclick="activateSubtab(this,'corrected',${id})">Corrected</button>` : ''}
+        ${data.speaker   ? `<button class="transcript-subtab" onclick="activateSubtab(this,'speaker',${id})">Speaker</button>`   : ''}
+      </div>
+      <div class="detail-transcript-text subtab-panel" data-subtab="raw">${esc(data.raw || '')}</div>
+      ${data.corrected ? `<div class="detail-transcript-text subtab-panel" data-subtab="corrected" style="display:none">${esc(data.corrected)}</div>` : ''}
+      ${data.speaker   ? `<div class="detail-transcript-text subtab-panel" data-subtab="speaker"    style="display:none">${esc(data.speaker)}</div>`   : ''}`
+    : `<p class="detail-empty">No transcript yet — click Transcribe to generate one.</p>`;
+
+  const summaryPanel = data.summary
+    ? `<div class="detail-transcript-text">${esc(data.summary)}</div>`
+    : `<p class="detail-empty">No summary yet — click Summarize to generate one.</p>`;
+
   return `
     <div class="detail-tabs">
-      <button class="detail-tab active" data-tab="raw"
-              onclick="activateDetailTab(this,'raw',${id})">Raw Whisper</button>
-      <button class="detail-tab" data-tab="corrected"
-              onclick="activateDetailTab(this,'corrected',${id})">Corrected</button>
-      <button class="detail-tab" data-tab="summary"
+      <button class="detail-tab active${hasTranscript ? '' : ' tab-empty'}" data-tab="transcript"
+              onclick="activateDetailTab(this,'transcript',${id})">Transcript</button>
+      <button class="detail-tab${data.summary ? '' : ' tab-empty'}" data-tab="summary"
               onclick="activateDetailTab(this,'summary',${id})">Summary</button>
-      ${data.speaker ? `<button class="detail-tab" data-tab="speaker"
-              onclick="activateDetailTab(this,'speaker',${id})">Speaker</button>` : ''}
     </div>
-    <div class="detail-transcript-text" data-tab="raw">${esc(data.raw || '(not available)')}</div>
-    <div class="detail-transcript-text" data-tab="corrected" style="display:none">${esc(data.corrected || '(not available)')}</div>
-    <div class="detail-transcript-text" data-tab="summary" style="display:none">${data.summary ? esc(data.summary) : '<span style="color:var(--muted)">No summary yet — click Summarize to generate one.</span>'}</div>
-    ${data.speaker ? `<div class="detail-transcript-text" data-tab="speaker" style="display:none">${esc(data.speaker)}</div>` : ''}
+    <div class="detail-panel" data-tab="transcript">${transcriptPanel}</div>
+    <div class="detail-panel" data-tab="summary" style="display:none">${summaryPanel}</div>
   `;
 }
 
@@ -775,25 +830,21 @@ function activateDetailTab(btn, tab, id) {
   const detail = card.querySelector('.rec-detail');
   detail.querySelectorAll('.detail-tab').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
-  detail.querySelectorAll('.detail-transcript-text').forEach(p => {
+  detail.querySelectorAll('.detail-panel').forEach(p => {
     p.style.display = p.dataset.tab === tab ? '' : 'none';
   });
 }
 
-async function toggleCardExpandTab(id, tab) {
+function activateSubtab(btn, subtab, id) {
   const card = document.querySelector(`.rec-card[data-id="${id}"]`);
-  if (card && card.classList.contains('expanded')) {
-    // Already open — just switch tab
-    const detail = card.querySelector('.rec-detail');
-    const btn = detail && detail.querySelector(`.detail-tab[data-tab="${tab}"]`);
-    if (btn) activateDetailTab(btn, tab, id);
-    return;
-  }
-  await toggleCardExpand(id);
-  // After expand, switch to the requested tab
-  const detail = document.querySelector(`.rec-card[data-id="${id}"] .rec-detail`);
-  const btn = detail && detail.querySelector(`.detail-tab[data-tab="${tab}"]`);
-  if (btn) activateDetailTab(btn, tab, id);
+  if (!card) return;
+  const panel = card.querySelector('.detail-panel[data-tab="transcript"]');
+  if (!panel) return;
+  panel.querySelectorAll('.transcript-subtab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  panel.querySelectorAll('.subtab-panel').forEach(p => {
+    p.style.display = p.dataset.subtab === subtab ? '' : 'none';
+  });
 }
 
 // ── Import ────────────────────────────────────────────────────────────────────

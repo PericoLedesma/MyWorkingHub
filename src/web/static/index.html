@@ -58,12 +58,31 @@
             </div>
           </div>
 
+          <div class="rec-station-meta">
+            <div class="rec-meta-field">
+              <label class="rec-meta-label" for="new-project">Project</label>
+              <input id="new-project" type="text" class="rec-meta-input" placeholder="Project name…" />
+            </div>
+            <div class="rec-meta-field">
+              <label class="rec-meta-label" for="new-meeting">Meeting</label>
+              <input id="new-meeting" type="text" class="rec-meta-input" placeholder="Meeting title…" />
+            </div>
+          </div>
+
           <div class="rec-station-action">
             <button id="record-btn" class="idle" onclick="toggleRecord()">
               <span class="dot"></span>
               <span id="record-label">Record</span>
             </button>
             <span id="timer">00:00</span>
+          </div>
+
+          <div id="live-transcript-panel" style="display:none">
+            <div class="live-tx-header">
+              <span class="live-tx-dot"></span>
+              Live transcript
+            </div>
+            <div id="live-tx-body"></div>
           </div>
 
         </div>

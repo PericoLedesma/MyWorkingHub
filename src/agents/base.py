@@ -14,8 +14,11 @@ class BaseAgent:
     tools: list = []
     model: str = "deepseek-chat"
 
-    def __init__(self, client: OpenAI):
+    def __init__(self, client: OpenAI | None):
         self._client = client
+
+    def _get_client(self) -> OpenAI:
+        return self._client  # type: ignore[return-value]
 
     def run_async(self, messages: list[dict], tool_handlers: dict, on_done) -> None:
         """Run the agentic loop in a background daemon thread.
@@ -36,7 +39,7 @@ class BaseAgent:
                     kwargs["tools"] = self.tools
                     kwargs["tool_choice"] = "auto"
 
-                resp = self._client.chat.completions.create(**kwargs)
+                resp = self._get_client().chat.completions.create(**kwargs)
                 msg = resp.choices[0].message
 
                 if not getattr(msg, "tool_calls", None):
@@ -90,7 +93,7 @@ class BaseAgent:
                     kwargs["tools"] = self.tools
                     kwargs["tool_choice"] = "auto"
 
-                stream = self._client.chat.completions.create(**kwargs)
+                stream = self._get_client().chat.completions.create(**kwargs)
 
                 content_parts: list[str] = []
                 tool_calls_acc: dict[int, dict] = {}

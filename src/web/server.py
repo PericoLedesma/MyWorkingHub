@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from src import db
 from src.recorder import Recorder, list_input_devices, FOLDER
 from src.transcriber import Transcriber
+from src.live_transcriber import LiveTranscriber
 from src.agents.agent_orchestrator import ChatAgent
 from src.agents.agent_summarization import SummarizationAgent
 from src.web import state
@@ -29,6 +30,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 # ── Singletons ───────────────────────────────────────────────────────────────
 
 _transcriber = Transcriber()
+_live_transcriber = LiveTranscriber()
 _chat_agent = ChatAgent()
 _sum_agent = SummarizationAgent()
 
@@ -199,6 +201,7 @@ def get_transcript(rid: int):
         "raw": db.get_transcript_raw(rid),
         "summary": db.get_summary(rid),
         "language": db.get_language(rid),
+        "speaker": db.get_transcript_speaker(rid),
     }
 
 
@@ -276,6 +279,14 @@ async def record_start(body: RecordStart):
     )
     threading.Thread(target=fn, daemon=True).start()
 
+    def _on_live_segment(timestamp: str, text: str) -> None:
+        asyncio.run_coroutine_threadsafe(
+            state.broadcast({"type": "live_transcript", "timestamp": timestamp, "text": text}),
+            state.loop,
+        )
+
+    _live_transcriber.start(stop_ev, rec.drain_live_chunks, _on_live_segment)
+
     await state.broadcast({
         "type": "recording_started",
         "source": body.source,
@@ -310,9 +321,35 @@ async def import_recording(file: UploadFile, background_tasks: BackgroundTasks):
         dest = os.path.join(FOLDER, f"import_{stem}_{int(time.time())}.wav")
         try:
             if suffix != ".wav":
+                import shutil as _shutil
+                import winreg as _winreg
+
+                def _fresh_path() -> str:
+                    """Read PATH from registry so it works even if the process inherited a stale env."""
+                    parts = []
+                    for hive, sub in [
+                        (_winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                        (_winreg.HKEY_CURRENT_USER, r"Environment"),
+                    ]:
+                        try:
+                            with _winreg.OpenKey(hive, sub) as k:
+                                parts.append(_winreg.QueryValueEx(k, "Path")[0])
+                        except FileNotFoundError:
+                            pass
+                    return os.pathsep.join(parts)
+
+                env = os.environ.copy()
+                env["PATH"] = _fresh_path()
+
+                ffmpeg_exe = _shutil.which("ffmpeg", path=env["PATH"])
+                if not ffmpeg_exe:
+                    raise RuntimeError(
+                        "ffmpeg is not installed or not in PATH. "
+                        "Install ffmpeg (https://ffmpeg.org/download.html) to import non-WAV files."
+                    )
                 subprocess.run(
-                    ["ffmpeg", "-y", "-i", tmp_path, dest],
-                    check=True, capture_output=True
+                    [ffmpeg_exe, "-y", "-i", tmp_path, dest],
+                    check=True, capture_output=True, env=env
                 )
             else:
                 shutil.copy(tmp_path, dest)
