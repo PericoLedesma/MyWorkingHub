@@ -9,7 +9,7 @@ import soundfile as sf
 log = logging.getLogger(__name__)
 
 LIVE_WHISPER_MODEL = os.environ.get("LIVE_WHISPER_MODEL", "small")
-INTERVAL_SEC = 10
+INTERVAL_SEC = 5
 
 
 class LiveTranscriber:
@@ -42,14 +42,22 @@ class LiveTranscriber:
         ).start()
 
     def _loop(self, stop_event: threading.Event, drain_fn, on_segment) -> None:
-        model = self._get_model()
+        log.info("Live transcriber thread started")
+        try:
+            model = self._get_model()
+        except Exception:
+            log.exception("Failed to load live transcription model — live transcript disabled")
+            return
+        log.info("Live transcriber model ready, polling every %ds", INTERVAL_SEC)
         total_samples = 0
 
         while not stop_event.is_set():
             stop_event.wait(timeout=INTERVAL_SEC)
 
             chunks, rate, channels = drain_fn()
+            log.debug("Drain: %d chunks, rate=%d, channels=%d", len(chunks), rate, channels)
             if not chunks or rate == 0:
+                log.debug("No audio to transcribe — skipping")
                 continue
 
             audio = np.concatenate(chunks).astype(np.float32)
@@ -58,7 +66,10 @@ class LiveTranscriber:
             else:
                 audio = audio.flatten()
 
+            duration_s = len(audio) / rate
+            log.debug("Audio chunk: %.1f s (%d samples at %d Hz)", duration_s, len(audio), rate)
             if len(audio) < rate:  # skip if less than 1 second
+                log.debug("Chunk too short — skipping")
                 continue
 
             chunk_start_sec = total_samples / rate
@@ -68,12 +79,19 @@ class LiveTranscriber:
             os.close(fd)
             try:
                 sf.write(tmp, audio, rate)
-                segments, _ = model.transcribe(tmp, beam_size=5)
+                log.info("Transcribing %.1f s chunk (offset %.0f s)…", duration_s, chunk_start_sec)
+                segments, info = model.transcribe(tmp, beam_size=5)
+                n = 0
                 for seg in segments:
+                    n += 1
                     abs_t = int(chunk_start_sec + seg.start)
                     h, rem = divmod(abs_t, 3600)
                     m, s = divmod(rem, 60)
-                    on_segment(f"[{h:02d}:{m:02d}:{s:02d}]", seg.text.strip())
+                    text = seg.text.strip()
+                    log.info("  Segment: [%02d:%02d:%02d] %s", h, m, s, text)
+                    on_segment(f"[{h:02d}:{m:02d}:{s:02d}]", text)
+                if n == 0:
+                    log.info("  No speech detected in chunk (language=%s)", getattr(info, 'language', '?'))
             except Exception:
                 log.exception("Live transcription chunk failed")
             finally:
@@ -81,3 +99,4 @@ class LiveTranscriber:
                     os.unlink(tmp)
                 except Exception:
                     pass
+        log.info("Live transcriber thread exiting")

@@ -1,4 +1,4 @@
 @echo off
-cd /d "C:\Users\p.ledesma.jimenez\scripts\SmartRecorder"
+cd /d "%~dp0"
 call .venv\Scripts\activate.bat
 python main.py

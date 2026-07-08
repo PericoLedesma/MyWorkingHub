@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 48px;
+      height: 96px;
+      overflow: hidden;
+      background: transparent;
+    }
+
+    .handle {
+      width: 48px;
+      height: 96px;
+      background: linear-gradient(160deg, #1c1c35 0%, #141428 100%);
+      border: 1px solid rgba(99, 102, 241, 0.38);
+      border-right: none;
+      border-radius: 12px 0 0 12px;
+      box-shadow: -4px 0 20px rgba(0, 0, 0, 0.6), inset 1px 0 0 rgba(255,255,255,0.04);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      cursor: pointer;
+      -webkit-app-region: no-drag;
+      user-select: none;
+      transition: background 0.15s, box-shadow 0.15s;
+    }
+
+    .handle:hover {
+      background: linear-gradient(160deg, #222244 0%, #1a1a38 100%);
+      box-shadow: -4px 0 24px rgba(99, 102, 241, 0.25), inset 1px 0 0 rgba(255,255,255,0.06);
+    }
+
+    .handle:active {
+      background: linear-gradient(160deg, #181830 0%, #111122 100%);
+    }
+
+    .mic {
+      color: #6366f1;
+      flex-shrink: 0;
+      transition: color 0.15s;
+    }
+
+    .handle:hover .mic { color: #818cf8; }
+
+    .label {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 8px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      color: #4f4f8f;
+      writing-mode: vertical-rl;
+      text-orientation: mixed;
+      transition: color 0.15s;
+    }
+
+    .handle:hover .label { color: #6366f1; }
+  </style>
+</head>
+<body>
+  <div class="handle" id="handle" title="SmartRecorder — click to open">
+    <svg class="mic" width="18" height="18" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+      <line x1="12" y1="19" x2="12" y2="22"/>
+      <line x1="8"  y1="22" x2="16" y2="22"/>
+    </svg>
+    <span class="label">REC</span>
+  </div>
+
+  <script>
+    document.getElementById('handle').addEventListener('click', () => {
+      window.electronAPI.toggle();
+    });
+  </script>
+</body>
+</html>

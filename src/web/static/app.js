@@ -26,6 +26,7 @@ const S = {
 
 // ── Page navigation ───────────────────────────────────────────────────────────
 function showPage(name) {
+  window.electronAPI?.pageChange(name);
   document.querySelectorAll('.page').forEach(p => { p.style.display = 'none'; });
   document.getElementById('page-' + name).style.display = '';
   document.querySelectorAll('.nav-btn').forEach(b => {
@@ -193,8 +194,9 @@ function onWsMessage(msg) {
     case 'init':
       S.recording = msg.recording;
       S.recordingStart = msg.recording_start;
-      (msg.transcribing || []).forEach(id => addJob(id, 'transcribe'));
-      (msg.summarizing  || []).forEach(id => addJob(id, 'summarize'));
+      (msg.transcribing     || []).forEach(id => addJob(id, 'transcribe'));
+      (msg.summarizing      || []).forEach(id => addJob(id, 'summarize'));
+      (msg.notes_generating || []).forEach(id => addJob(id, 'notes'));
       updateRecordButton();
       if (S.recording) startTimer();
       break;
@@ -222,7 +224,8 @@ function onWsMessage(msg) {
       S.recordingStart = null;
       updateRecordButton();
       stopTimer();
-      document.getElementById('live-transcript-panel').style.display = 'none';
+      // Stay on Recordings page — live transcript remains visible for any in-flight chunks.
+      // The recording is saved in the background; user can navigate to History when ready.
       if (msg.meta) {
         const newRec = msg.meta;
         S.recordings.unshift(newRec);
@@ -232,10 +235,7 @@ function onWsMessage(msg) {
           filterRecordings();
           updateProjectFilter();
           renderHistoryBar();
-          showPage('history');
         })();
-      } else {
-        showPage('history');
       }
       break;
 
@@ -252,6 +252,11 @@ function onWsMessage(msg) {
     case 'summarized':
       removeJob(msg.id, 'summarize');
       refreshCardFromServer(msg.id);
+      break;
+
+    case 'notes_generated':
+      removeJob(msg.id, 'notes');
+      if (S.expandedCardId === msg.id) refreshExpandedDetail(msg.id);
       break;
 
     case 'imported':
@@ -797,6 +802,27 @@ async function toggleCardExpand(id) {
 
 function buildDetailHTML(id, data) {
   const hasTranscript = !!(data.raw || data.corrected);
+  const isGeneratingNotes = (S.pendingJobs[id] || new Set()).has('notes');
+
+  let notesSection = '';
+  if (hasTranscript) {
+    if (data.notes) {
+      notesSection = `
+        <div class="notes-section">
+          <div class="notes-header">
+            <span class="notes-label">Notes</span>
+            <button class="act-btn${isGeneratingNotes ? ' spinning' : ''}" ${isGeneratingNotes ? 'disabled' : ''} onclick="generateNotes(${id})">Regenerate</button>
+          </div>
+          <textarea class="notes-textarea" onblur="saveNotes(${id}, this.value)" placeholder="AI-generated notes will appear here…">${esc(data.notes)}</textarea>
+        </div>`;
+    } else {
+      notesSection = `
+        <div class="notes-section notes-empty">
+          <button class="act-btn primary${isGeneratingNotes ? ' spinning' : ''}" ${isGeneratingNotes ? 'disabled' : ''} onclick="generateNotes(${id})">Generate notes</button>
+        </div>`;
+    }
+  }
+
   const transcriptPanel = hasTranscript
     ? `<div class="transcript-subtabs">
         <button class="transcript-subtab active" onclick="activateSubtab(this,'raw',${id})">Raw</button>
@@ -813,6 +839,7 @@ function buildDetailHTML(id, data) {
     : `<p class="detail-empty">No summary yet — click Summarize to generate one.</p>`;
 
   return `
+    ${notesSection}
     <div class="detail-tabs">
       <button class="detail-tab active${hasTranscript ? '' : ' tab-empty'}" data-tab="transcript"
               onclick="activateDetailTab(this,'transcript',${id})">Transcript</button>
@@ -847,6 +874,32 @@ function activateSubtab(btn, subtab, id) {
   });
 }
 
+async function refreshExpandedDetail(id) {
+  const card = document.querySelector(`.rec-card[data-id="${id}"]`);
+  if (!card || !card.classList.contains('expanded')) return;
+  const data = await fetch(`/api/recordings/${id}/transcript`).then(r => r.json()).catch(() => ({}));
+  const detail = card.querySelector('.rec-detail');
+  if (detail) {
+    detail.innerHTML = buildDetailHTML(id, data);
+    const tab = detail.querySelector('.detail-tab[data-tab="transcript"]');
+    if (tab) activateDetailTab(tab, 'transcript', id);
+  }
+}
+
+async function saveNotes(id, text) {
+  await api('PATCH', `/api/recordings/${id}/notes`, { text });
+}
+
+async function generateNotes(id) {
+  addJob(id, 'notes');
+  const card = document.querySelector(`.rec-card[data-id="${id}"]`);
+  if (card) {
+    const btn = card.querySelector('.notes-section .act-btn');
+    if (btn) { btn.disabled = true; btn.classList.add('spinning'); }
+  }
+  await api('POST', `/api/recordings/${id}/generate-notes`);
+}
+
 // ── Import ────────────────────────────────────────────────────────────────────
 async function importFile(input) {
   const file = input.files[0];
@@ -857,39 +910,6 @@ async function importFile(input) {
   await fetch('/api/import', { method: 'POST', body: fd });
 }
 
-// ── Resize handle ─────────────────────────────────────────────────────────────
-function initResizeHandle() {
-  const handle  = document.getElementById('resize-handle');
-  const recPanel = document.getElementById('recordings-panel');
-  const main    = document.getElementById('main');
-  let dragging  = false, startX = 0, startW = 0;
-
-  handle.addEventListener('mousedown', e => {
-    dragging = true;
-    startX   = e.clientX;
-    startW   = recPanel.offsetWidth;
-    handle.classList.add('dragging');
-    document.body.style.cursor    = 'col-resize';
-    document.body.style.userSelect = 'none';
-    e.preventDefault();
-  });
-
-  document.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    const totalW  = main.offsetWidth;
-    const newW    = Math.min(Math.max(startW + (e.clientX - startX), 280), totalW - 240 - 5);
-    recPanel.style.width = newW + 'px';
-  });
-
-  document.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false;
-    handle.classList.remove('dragging');
-    document.body.style.cursor     = '';
-    document.body.style.userSelect = '';
-  });
-}
-
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   loadDevices();
@@ -897,5 +917,4 @@ document.addEventListener('DOMContentLoaded', () => {
   connectWS();
   connectChatWS();
   initVuMeter();
-  initResizeHandle();
 });

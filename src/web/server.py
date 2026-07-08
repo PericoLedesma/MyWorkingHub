@@ -20,6 +20,7 @@ from src.transcriber import Transcriber
 from src.live_transcriber import LiveTranscriber
 from src.agents.agent_orchestrator import ChatAgent
 from src.agents.agent_summarization import SummarizationAgent
+from src.agents.agent_notes import NotesAgent
 from src.web import state
 
 log = logging.getLogger(__name__)
@@ -33,6 +34,7 @@ _transcriber = Transcriber()
 _live_transcriber = LiveTranscriber()
 _chat_agent = ChatAgent()
 _sum_agent = SummarizationAgent()
+_notes_agent = NotesAgent()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -60,11 +62,6 @@ async def _on_recording_done(meta: dict | None, reason: str | None) -> None:
 
     if meta:
         await state.broadcast({"type": "recording_stopped", "meta": _rec_to_dict(meta)})
-        rid = meta["id"]
-        fp = meta["filepath"]
-        state.transcribing.add(rid)
-        await state.broadcast({"type": "job_started", "job": "transcribe", "id": rid})
-        _transcriber.transcribe_async(rid, fp, _transcribe_done_cb)
     else:
         await state.broadcast({"type": "recording_stopped", "meta": None, "reason": reason})
 
@@ -84,6 +81,10 @@ def _transcribe_done_cb(recording_id: int, text: str | None, language: str) -> N
             await state.broadcast({"type": "job_started", "job": "summarize", "id": recording_id})
             _sum_agent.summarize_async(recording_id, text, language, _summarize_done_cb)
 
+            state.notes_generating.add(recording_id)
+            await state.broadcast({"type": "job_started", "job": "notes", "id": recording_id})
+            _notes_agent.generate_notes_async(recording_id, text, language, _notes_done_cb)
+
     asyncio.run_coroutine_threadsafe(_cb(), state.loop)
 
 
@@ -94,6 +95,18 @@ def _summarize_done_cb(recording_id: int, summary: str | None) -> None:
             "type": "summarized",
             "id": recording_id,
             "ok": summary is not None,
+        })
+
+    asyncio.run_coroutine_threadsafe(_cb(), state.loop)
+
+
+def _notes_done_cb(recording_id: int, notes: str | None) -> None:
+    async def _cb():
+        state.notes_generating.discard(recording_id)
+        await state.broadcast({
+            "type": "notes_generated",
+            "id": recording_id,
+            "ok": notes is not None,
         })
 
     asyncio.run_coroutine_threadsafe(_cb(), state.loop)
@@ -202,7 +215,32 @@ def get_transcript(rid: int):
         "summary": db.get_summary(rid),
         "language": db.get_language(rid),
         "speaker": db.get_transcript_speaker(rid),
+        "notes": db.get_notes(rid),
     }
+
+
+class NotesUpdate(BaseModel):
+    text: str
+
+
+@app.patch("/api/recordings/{rid}/notes")
+def save_notes_endpoint(rid: int, body: NotesUpdate):
+    db.save_notes(rid, body.text)
+    return {"ok": True}
+
+
+@app.post("/api/recordings/{rid}/generate-notes")
+async def generate_notes(rid: int):
+    text = db.get_transcript(rid)
+    if not text:
+        raise HTTPException(400, "no transcript available")
+    if rid in state.notes_generating:
+        return {"ok": False, "reason": "already_running"}
+    state.notes_generating.add(rid)
+    language = db.get_language(rid) or "unknown"
+    await state.broadcast({"type": "job_started", "job": "notes", "id": rid})
+    _notes_agent.generate_notes_async(rid, text, language, _notes_done_cb)
+    return {"ok": True}
 
 
 @app.post("/api/recordings/{rid}/transcribe")
@@ -422,6 +460,7 @@ async def ws_app(ws: WebSocket):
             "recording_start": state.recording_start,
             "transcribing": list(state.transcribing),
             "summarizing": list(state.summarizing),
+            "notes_generating": list(state.notes_generating),
         }))
         while True:
             await ws.receive_text()   # keep connection alive; absorb any client pings

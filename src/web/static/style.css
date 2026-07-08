@@ -248,39 +248,15 @@ body:has(#record-btn.recording) #timer { color: var(--red); }
 
 /* Recordings panel */
 #recordings-panel {
-  flex: none; width: 58%;
+  flex: 1;
   display: flex; flex-direction: column;
   overflow: hidden; min-width: 300px;
 }
 
-/* Resize handle */
-#resize-handle {
-  flex: none; width: 4px;
-  background: var(--border);
-  cursor: col-resize; transition: background .15s;
-}
-#resize-handle:hover,
-#resize-handle.dragging { background: var(--accent); }
-
-/* Right panel (Timeline + Chat tabs) */
-#right-panel {
-  flex: 1; display: flex; flex-direction: column;
-  overflow: hidden; min-width: 280px;
-  background: var(--bg);
-}
-.right-panel-header {
-  flex: none; padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surf);
-  font-size: 12px; font-weight: 600; color: var(--sub);
-  letter-spacing: .01em;
-}
-
-.rpanel-view { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-
-/* Chat panel */
+/* Chat page */
+#page-chat { display: flex; flex-direction: column; overflow: hidden; }
 #chat-panel {
-  overflow: hidden;
+  flex: 1; display: flex; flex-direction: column; overflow: hidden;
 }
 
 /* ── Filter bar ── */
@@ -808,6 +784,26 @@ body:has(#record-btn.recording) #timer { color: var(--red); }
 .live-tx-text {
   color: var(--text);
 }
+
+/* ── Notes section ── */
+.notes-section { margin-bottom: 12px; }
+.notes-section.notes-empty { display: flex; justify-content: flex-start; }
+.notes-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.notes-label {
+  font-size: 10px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .08em;
+}
+.notes-textarea {
+  width: 100%; background: var(--surf); border: 1px solid var(--border); border-radius: 7px;
+  padding: 12px 14px; font-size: 12px; line-height: 1.75; color: #ccc;
+  resize: vertical; min-height: 80px; font-family: inherit; outline: none;
+  transition: border-color .15s; white-space: pre-wrap;
+}
+.notes-textarea:focus { border-color: var(--accent); }
+.notes-textarea::placeholder { color: var(--muted); }
 
 /* ── Empty state ── */
 .empty-state {

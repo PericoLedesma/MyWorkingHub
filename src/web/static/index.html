@@ -26,6 +26,10 @@
         <span class="nav-icon">📋</span>
         <span class="nav-label">History</span>
       </button>
+      <button class="nav-btn" data-page="chat" onclick="showPage('chat')">
+        <span class="nav-icon">💬</span>
+        <span class="nav-label">AI Chat</span>
+      </button>
       <button class="nav-btn" data-page="guide" onclick="showPage('guide')">
         <span class="nav-icon">📖</span>
         <span class="nav-label">How it works</span>
@@ -114,20 +118,18 @@
             </div>
           </div>
 
-          <div id="resize-handle"></div>
+        </div>
+      </div>
 
-          <div id="right-panel">
-            <div class="right-panel-header">AI Chat</div>
-            <div id="chat-panel" class="rpanel-view">
-              <div id="chat-messages"></div>
-              <div id="chat-input-row">
-                <textarea id="chat-input" placeholder="Ask about your recordings…"
-                          onkeydown="onChatKey(event)"></textarea>
-                <button id="chat-send" onclick="sendChatMessage()">Send</button>
-              </div>
-            </div>
+      <!-- ── Page: AI Chat ─────────────────────────────────── -->
+      <div id="page-chat" class="page" style="display:none">
+        <div id="chat-panel">
+          <div id="chat-messages"></div>
+          <div id="chat-input-row">
+            <textarea id="chat-input" placeholder="Ask about your recordings…"
+                      onkeydown="onChatKey(event)"></textarea>
+            <button id="chat-send" onclick="sendChatMessage()">Send</button>
           </div>
-
         </div>
       </div>
 
@@ -213,7 +215,7 @@
               <div class="guide-step-body">
                 <div class="guide-step-title">AI Chat <span class="guide-badge api">API · DeepSeek</span></div>
                 <p class="guide-step-desc">
-                  The <strong>AI Chat</strong> panel (right side of History) lets you ask questions across all your recordings.
+                  The <strong>AI Chat</strong> page lets you ask questions across all your recordings.
                   The assistant can search through transcripts to find relevant moments, people, decisions, or topics.
                   It responds in Spanish by default.
                 </p>

@@ -27,6 +27,7 @@ monitor_stop: threading.Event | None = None
 # In-progress job id sets (all mutations must happen on the event loop)
 transcribing: set[int] = set()
 summarizing: set[int] = set()
+notes_generating: set[int] = set()
 
 # Chat conversation history (user + assistant turns, no system message)
 chat_history: list[dict] = []

@@ -54,8 +54,3 @@ class ChatAgent(BaseAgent):
             )
         return self._client
 
-    def send_async(self, messages: list[dict], on_response) -> None:
-        def _buscar_grabaciones(consulta: str) -> list[dict]:
-            return db.search_transcripts(consulta)
-
-        self.run_async(messages, {"buscar_grabaciones": _buscar_grabaciones}, on_response)

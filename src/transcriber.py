@@ -13,19 +13,6 @@ log = logging.getLogger(__name__)
 
 MAX_CHUNK_BYTES = 24 * 1024 * 1024
 
-CORRECTION_PROMPT = (
-    "You are a transcription corrector. "
-    "You will receive a raw speech-to-text transcript that may contain errors caused by "
-    "poor audio quality, background noise, or similar-sounding words being mistranscribed. "
-    "Fix ONLY clear transcription errors: wrong homophones, garbled words, or obvious mishearings. "
-    "Do NOT: rephrase, restructure, improve style, fix grammar, add punctuation, "
-    "change word order, or alter anything that is not a transcription error. "
-    "If a word could be correct, leave it exactly as-is. "
-    "The output must be word-for-word identical to the input except for corrected mishearings. "
-    "Preserve any [HH:MM:SS] timestamp markers exactly as they appear. "
-    "Return only the corrected text, nothing else."
-)
-
 
 def _split_wav(path: str) -> list[tuple[str, float]]:
     """Split a WAV file into <24 MB temp chunks; returns list of (temp_path, start_sec)."""
@@ -49,7 +36,6 @@ def _split_wav(path: str) -> list[tuple[str, float]]:
 
 
 class Transcriber:
-    """Transcribes audio with the OpenAI whisper-1 API, then corrects with an LLM."""
 
     def __init__(self):
         self._client = OpenAI()
@@ -59,12 +45,26 @@ class Transcriber:
             resp = self._client.audio.transcriptions.create(
                 model="whisper-1", file=f, response_format="verbose_json"
             )
+        BUCKET_SEC = 120
         parts: list[str] = []
+        current_bucket = -1
+        bucket_texts: list[str] = []
+        bucket_label = ""
         for seg in resp.segments:
             t = int(seg.start) + int(offset_sec)
-            h, rem = divmod(t, 3600)
-            m, s = divmod(rem, 60)
-            parts.append(f"[{h:02d}:{m:02d}:{s:02d}] {seg.text.strip()}")
+            bucket = t // BUCKET_SEC
+            if bucket != current_bucket:
+                if bucket_texts:
+                    parts.append(f"{bucket_label} {' '.join(bucket_texts)}")
+                current_bucket = bucket
+                h, rem = divmod(t, 3600)
+                m, s = divmod(rem, 60)
+                bucket_label = f"[{h:02d}:{m:02d}:{s:02d}]"
+                bucket_texts = [seg.text.strip()]
+            else:
+                bucket_texts.append(seg.text.strip())
+        if bucket_texts:
+            parts.append(f"{bucket_label} {' '.join(bucket_texts)}")
         return parts, resp.language
 
     def _transcribe_audio(self, filepath: str) -> tuple[str, str]:
@@ -87,17 +87,6 @@ class Transcriber:
             for chunk_path, _ in chunks:
                 os.unlink(chunk_path)
 
-    def _correct(self, raw_text: str) -> str:
-        response = self._client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": CORRECTION_PROMPT},
-                {"role": "user", "content": raw_text},
-            ],
-        )
-        content = response.choices[0].message.content
-        return content if content is not None else raw_text
-
     def transcribe_async(self, recording_id: int, filepath: str, on_done) -> None:
         threading.Thread(
             target=self._transcribe,
@@ -111,9 +100,8 @@ class Transcriber:
             log.info("Detected language: %s  id=%d", language, recording_id)
             db.save_language(recording_id, language)
             db.save_transcript_raw(recording_id, raw)
-            text = self._correct(raw)
-            db.save_transcript(recording_id, text)
-            on_done(recording_id, text, language)
+            db.save_transcript(recording_id, raw)
+            on_done(recording_id, raw, language)
         except Exception:
             log.exception("Transcription failed for %s", filepath)
             on_done(recording_id, None, "unknown")

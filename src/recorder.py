@@ -233,8 +233,9 @@ class Recorder:
         app_rate     = int(device["defaultSampleRate"])
         app_channels = device["maxInputChannels"]
         mic_rate     = int(mic_info["defaultSampleRate"])
-        self._live_rate = app_rate
-        self._live_channels = app_channels
+        # Live transcription captures mic audio (mono) so the local speaker's voice is always heard
+        self._live_rate = mic_rate
+        self._live_channels = 1
         mic_chunks: list[np.ndarray] = []
         app_chunks: list[np.ndarray] = []
         # level vars are shared across two callbacks running on different threads
@@ -247,6 +248,8 @@ class Recorder:
             nonlocal mic_lv
             chunk = np.frombuffer(in_data, dtype=np.float32)
             mic_chunks.append(chunk.copy())
+            with self._live_lock:
+                self._live_chunks.append(chunk.copy())
             mic_lv = _rms_level(chunk)
             self._set_mic_level(mic_lv)
             return None, pyaudio.paContinue
@@ -255,8 +258,6 @@ class Recorder:
             nonlocal app_lv
             chunk = np.frombuffer(in_data, dtype=np.float32)
             app_chunks.append(chunk.copy())
-            with self._live_lock:
-                self._live_chunks.append(chunk.copy())
             app_lv = _rms_level(chunk)
             self._set_app_level(app_lv)
             return None, pyaudio.paContinue
