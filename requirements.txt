@@ -7,3 +7,8 @@ fastapi
 uvicorn[standard]
 python-multipart
 faster-whisper
+mcp
+pyautogui
+pynput
+msal
+requests

@@ -10,7 +10,7 @@
 recordings/
 
 # Database
-smart_recorder.db
+*.db
 
 # Claude local settings
 .claude/settings.local.json

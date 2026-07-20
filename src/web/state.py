@@ -26,11 +26,14 @@ monitor_stop: threading.Event | None = None
 
 # In-progress job id sets (all mutations must happen on the event loop)
 transcribing: set[int] = set()
-summarizing: set[int] = set()
 notes_generating: set[int] = set()
 
 # Chat conversation history (user + assistant turns, no system message)
 chat_history: list[dict] = []
+
+# Server-managed focus session (started on launch, ended on shutdown)
+focus_session_id: int | None = None
+focus_session_start: str | None = None
 
 
 def init(event_loop: asyncio.AbstractEventLoop) -> None:

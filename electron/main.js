@@ -4,27 +4,18 @@ const path = require('path');
 const http = require('http');
 
 const TAB_W   = 48;
-const TAB_H   = 96;
+const TAB_H   = 316;
 const PORT    = 8765;
 const ANIM_MS = 220;
-
-const PAGE_WIDTHS = {
-  recordings: 600,
-  history:    960,
-  chat:       600,
-  guide:      800,
-};
-
-function getWidthForPage(page) {
-  return PAGE_WIDTHS[page] || PAGE_WIDTHS.recordings;
-}
+const PANEL_W = 780;
 
 let tabWin      = null;
 let appWin      = null;
 let python      = null;
 let expanded    = false;
 let animating   = false;
-let currentPage = 'recordings';
+let currentPage = 'home';
+let focusActive = false;
 
 // ---------------------------------------------------------------------------
 // Python server
@@ -33,7 +24,7 @@ let currentPage = 'recordings';
 function startPython() {
   const exe    = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
   const script = path.join(__dirname, '..', 'main.py');
-  python = spawn(exe, [script, '--no-browser'], { cwd: path.join(__dirname, '..') });
+  python = spawn(exe, [script], { cwd: path.join(__dirname, '..') });
   python.stdout.on('data', d => process.stdout.write(d));
   python.stderr.on('data', d => process.stderr.write(d));
   python.on('error', err => console.error('Python spawn error:', err.message));
@@ -88,20 +79,22 @@ function createTabWin() {
   });
   tabWin.loadFile(path.join(__dirname, 'tab.html'));
   tabWin.setAlwaysOnTop(true, 'screen-saver');
+  tabWin.webContents.on('did-finish-load', () => {
+    tabWin.webContents.send('focus-state', focusActive);
+  });
 
   tabWin.webContents.on('context-menu', () => {
     Menu.buildFromTemplate([
-      { label: 'Quit SmartRecorder', click: () => app.quit() },
+      { label: 'Quit My Working Hub', click: () => app.quit() },
     ]).popup({ window: tabWin });
   });
 }
 
 function createAppWin() {
   const { workRight, top, height } = getLayout();
-  const w = getWidthForPage('recordings');
   appWin = new BrowserWindow({
-    width: w, height,
-    x: workRight - TAB_W - w, y: top,
+    width: PANEL_W, height,
+    x: workRight - TAB_W - PANEL_W, y: top,
     frame: false, alwaysOnTop: true,
     skipTaskbar: false, resizable: false,
     show: false,   // hidden until first expand
@@ -151,12 +144,11 @@ function expand() {
   if (expanded || animating) return;
   expanded = true;
   const { workRight, top, height } = getLayout();
-  const w = getWidthForPage(currentPage);
   // Start at 1 px wide at the right edge, then grow left — never off-screen
   appWin.setBounds({ x: workRight - TAB_W - 1, y: top, width: 1, height });
   appWin.setIgnoreMouseEvents(false);
   appWin.show();
-  animateWidth(appWin, w, () => appWin.focus());
+  animateWidth(appWin, PANEL_W, () => appWin.focus());
 }
 
 function collapse() {
@@ -169,11 +161,6 @@ function collapse() {
   });
 }
 
-function resizeTo(page) {
-  if (!appWin || appWin.isDestroyed()) return;
-  animateWidth(appWin, getWidthForPage(page));
-}
-
 // ---------------------------------------------------------------------------
 // IPC
 // ---------------------------------------------------------------------------
@@ -182,7 +169,15 @@ ipcMain.on('toggle', () => expanded ? collapse() : expand());
 ipcMain.on('quit',   () => app.quit());
 ipcMain.on('page-change', (_event, name) => {
   currentPage = name;
-  if (expanded) resizeTo(name);
+});
+ipcMain.on('focus-state', (_event, active) => {
+  focusActive = active;
+  tabWin?.webContents.send('focus-state', active);
+});
+ipcMain.on('open-page', (_event, name) => {
+  currentPage = name;
+  appWin?.webContents.send('navigate', name);
+  if (!expanded) expand();
 });
 
 // ---------------------------------------------------------------------------
@@ -190,6 +185,9 @@ ipcMain.on('page-change', (_event, name) => {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(async () => {
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(permission === 'media');
+  });
   await session.defaultSession.clearCache();
   startPython();
   try { await waitForServer(); }

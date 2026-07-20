@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SmartRecorder</title>
+  <title>My Working Hub</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -16,30 +16,122 @@
   <div id="app-body">
 
     <nav id="sidebar">
-      <div class="sidebar-brand"><img src="/logo.png" class="sidebar-logo" alt="SmartRecorder" /> SmartRecorder</div>
-      <div class="sidebar-sep"></div>
-      <button class="nav-btn active" data-page="recordings" onclick="showPage('recordings')">
-        <span class="nav-icon">⏺</span>
+      <div class="sidebar-brand">My Working Hub</div>
+
+      <button class="nav-btn active" data-page="home" onclick="showPage('home')">
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg></span>
+        <span class="nav-label">Home</span>
+      </button>
+      <button class="nav-btn" data-page="projects" onclick="showPage('projects')">
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg></span>
+        <span class="nav-label">Projects</span>
+      </button>
+
+      <div class="nav-section">Capture</div>
+      <button class="nav-btn" data-page="recordings" onclick="showPage('recordings')">
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></span>
         <span class="nav-label">Recordings</span>
       </button>
       <button class="nav-btn" data-page="history" onclick="showPage('history')">
-        <span class="nav-icon">📋</span>
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg></span>
         <span class="nav-label">History</span>
       </button>
+
+      <div class="nav-section">Assistant</div>
       <button class="nav-btn" data-page="chat" onclick="showPage('chat')">
-        <span class="nav-icon">💬</span>
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
         <span class="nav-label">AI Chat</span>
       </button>
+
+      <div class="nav-section">Tools</div>
+      <button class="nav-btn" data-page="calendar" onclick="showPage('calendar')">
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></span>
+        <span class="nav-label">Calendar</span>
+      </button>
+      <button class="nav-btn" data-page="focustime" onclick="showPage('focustime')">
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 15"/></svg></span>
+        <span class="nav-label">Focus Time</span>
+        <span class="nav-ft-dot" id="nav-ft-dot"></span>
+      </button>
+      <button class="nav-btn" data-page="onenote" onclick="showPage('onenote')">
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg></span>
+        <span class="nav-label">OneNote</span>
+      </button>
+      <button class="nav-btn" data-page="tools" onclick="showPage('tools')">
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span>
+        <span class="nav-label">Tools & MCP</span>
+      </button>
+
+      <div class="nav-spacer"></div>
       <button class="nav-btn" data-page="guide" onclick="showPage('guide')">
-        <span class="nav-icon">📖</span>
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>
         <span class="nav-label">How it works</span>
       </button>
     </nav>
 
     <div id="content">
 
+      <!-- ── Page: Home ────────────────────────────────────── -->
+      <div id="page-home" class="page">
+        <div id="home-page">
+
+          <div class="home-greeting">
+            <span class="home-hello" id="home-hello">Good morning</span>
+            <span class="home-date" id="home-date"></span>
+          </div>
+
+          <div class="home-cards">
+            <div class="home-card" onclick="showPage('focustime')" title="Focus Time">
+              <div class="home-card-icon">⏱</div>
+              <div class="home-card-body">
+                <div class="home-card-label">Focus today</div>
+                <div class="home-card-value" id="home-focus-time">–</div>
+              </div>
+            </div>
+            <div class="home-card" onclick="showPage('history')" title="History">
+              <div class="home-card-icon">⏺</div>
+              <div class="home-card-body">
+                <div class="home-card-label">Recordings</div>
+                <div class="home-card-value" id="home-rec-count">–</div>
+              </div>
+            </div>
+            <div class="home-card home-card--wide" onclick="showPage('calendar')" title="Calendar">
+              <div class="home-card-icon">📅</div>
+              <div class="home-card-body">
+                <div class="home-card-label">Next meeting</div>
+                <div class="home-card-value home-card-value--sm" id="home-next-meeting">–</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="home-section-label">Quick actions</div>
+          <div class="home-actions">
+            <button class="home-action-btn" onclick="showPage('recordings')">
+              <span class="home-action-icon">⏺</span>
+              <span class="home-action-label">Record</span>
+            </button>
+            <button class="home-action-btn" onclick="showPage('chat')">
+              <span class="home-action-icon">💬</span>
+              <span class="home-action-label">AI Chat</span>
+            </button>
+            <button class="home-action-btn" onclick="showPage('calendar')">
+              <span class="home-action-icon">📅</span>
+              <span class="home-action-label">Calendar</span>
+            </button>
+            <button class="home-action-btn" onclick="showPage('focustime')">
+              <span class="home-action-icon">⏱</span>
+              <span class="home-action-label">Focus</span>
+            </button>
+          </div>
+
+          <div class="home-section-label">Recent recordings</div>
+          <div id="home-recent-list"></div>
+
+        </div>
+      </div>
+
       <!-- ── Page: Recordings ─────────────────────────────── -->
-      <div id="page-recordings" class="page">
+      <div id="page-recordings" class="page" style="display:none">
         <div class="rec-station">
 
           <div class="rec-station-source">
@@ -53,11 +145,11 @@
             <div class="vu-wrap">
               <div class="vu-row">
                 <span class="vu-label">MIC</span>
-                <canvas id="vu-mic" width="280" height="14" style="border-radius:4px;display:block;"></canvas>
+                <canvas id="vu-mic" width="420" height="14" style="border-radius:4px;display:block;"></canvas>
               </div>
               <div class="vu-row">
                 <span class="vu-label">APP</span>
-                <canvas id="vu-app" width="280" height="14" style="border-radius:4px;display:block;"></canvas>
+                <canvas id="vu-app" width="420" height="14" style="border-radius:4px;display:block;"></canvas>
               </div>
             </div>
           </div>
@@ -69,7 +161,9 @@
             </div>
             <div class="rec-meta-field">
               <label class="rec-meta-label" for="new-meeting">Meeting</label>
-              <input id="new-meeting" type="text" class="rec-meta-input" placeholder="Meeting title…" />
+              <input id="new-meeting" type="text" class="rec-meta-input" placeholder="Meeting title…" list="meeting-suggestions" />
+              <datalist id="meeting-suggestions"></datalist>
+              <div id="meeting-now-chip" class="meeting-now-chip" style="display:none"></div>
             </div>
           </div>
 
@@ -121,6 +215,24 @@
         </div>
       </div>
 
+      <!-- ── Page: Projects ────────────────────────────────── -->
+      <div id="page-projects" class="page" style="display:none">
+        <div id="proj-page">
+          <div class="proj-header">
+            <div class="proj-header-left">
+              <h2 class="proj-title">Projects</h2>
+              <span class="proj-count" id="proj-count"></span>
+            </div>
+            <button class="proj-new-btn" onclick="projOpenCreate()">+ New project</button>
+          </div>
+          <div id="proj-grid"></div>
+          <div id="proj-empty" class="empty-state" style="display:none">
+            <p>No projects yet.</p>
+            <p class="hint">Create a project to organise and track your recordings.</p>
+          </div>
+        </div>
+      </div>
+
       <!-- ── Page: AI Chat ─────────────────────────────────── -->
       <div id="page-chat" class="page" style="display:none">
         <div id="chat-panel">
@@ -137,9 +249,8 @@
       <div id="page-guide" class="page" style="display:none">
         <div id="guide-page">
           <div class="guide-header">
-            <h1 class="guide-title">How SmartRecorder works</h1>
+            <h1 class="guide-title">How My Working Hub works</h1>
             <p class="guide-subtitle">A step-by-step breakdown of the full pipeline</p>
-            <img src="/logo.png" class="guide-logo" alt="SmartRecorder" />
           </div>
 
           <div class="guide-steps">
@@ -194,25 +305,6 @@
             <div class="guide-step">
               <div class="guide-step-num">4</div>
               <div class="guide-step-body">
-                <div class="guide-step-title">Summarize <span class="guide-badge api">API · DeepSeek</span></div>
-                <p class="guide-step-desc">
-                  Click <strong>Summarize</strong> once a transcript exists.
-                  <strong>DeepSeek</strong> reads the corrected transcript and produces a structured summary with three sections:
-                </p>
-                <ul class="guide-list">
-                  <li><strong>KEY TOPICS</strong> — main subjects discussed</li>
-                  <li><strong>DECISIONS</strong> — conclusions reached</li>
-                  <li><strong>ACTION ITEMS</strong> — next steps and owners</li>
-                </ul>
-                <div class="guide-tip">The summary language matches the recording's detected language (Spanish or English).</div>
-              </div>
-            </div>
-
-            <div class="guide-connector"></div>
-
-            <div class="guide-step">
-              <div class="guide-step-num">5</div>
-              <div class="guide-step-body">
                 <div class="guide-step-title">AI Chat <span class="guide-badge api">API · DeepSeek</span></div>
                 <p class="guide-step-desc">
                   The <strong>AI Chat</strong> page lets you ask questions across all your recordings.
@@ -241,12 +333,6 @@
                 <span class="guide-api-cost">~$0.00015 / 1K tokens</span>
               </div>
               <div class="guide-api-row">
-                <span class="guide-api-step">Summarization</span>
-                <span class="guide-api-name">DeepSeek</span>
-                <span class="guide-badge api">API</span>
-                <span class="guide-api-cost">Very low cost</span>
-              </div>
-              <div class="guide-api-row">
                 <span class="guide-api-step">AI Chat</span>
                 <span class="guide-api-name">DeepSeek</span>
                 <span class="guide-badge api">API</span>
@@ -258,8 +344,478 @@
         </div>
       </div>
 
+      <!-- ── Page: Calendar ────────────────────────────────── -->
+      <div id="page-calendar" class="page" style="display:none">
+        <div id="cal-page">
+          <div class="cal-header">
+            <div class="cal-header-left">
+              <h2 class="cal-title">Today</h2>
+              <span class="cal-date" id="cal-date"></span>
+            </div>
+            <button class="cal-refresh-btn" onclick="calLoad()" title="Refresh">↻</button>
+          </div>
+          <div id="cal-status-bar"></div>
+          <div id="cal-list"></div>
+        </div>
+      </div>
+
+      <!-- ── Page: Focus Time ──────────────────────────────── -->
+      <div id="page-focustime" class="page" style="display:none">
+        <div id="ft-page">
+
+          <!-- Hero: ring timer -->
+          <div class="ft-hero">
+            <div class="ft-ring-wrap">
+              <svg class="ft-ring-svg" viewBox="0 0 120 120">
+                <circle class="ft-ring-track" cx="60" cy="60" r="52"/>
+                <circle class="ft-ring-fill" id="ft-ring-fill" cx="60" cy="60" r="52"/>
+              </svg>
+              <div class="ft-ring-inner">
+                <div class="ft-timer" id="ft-timer">–</div>
+                <div class="ft-ring-status" id="ft-status-label">Idle</div>
+              </div>
+            </div>
+            <div class="ft-status-row">
+              <span class="ft-dot" id="ft-dot"></span>
+              <span class="ft-idle-hint" id="ft-idle-hint">Move mouse or press a key to start</span>
+            </div>
+          </div>
+
+          <!-- Stats -->
+          <div class="ft-stats-grid">
+            <div class="ft-stat-card">
+              <div class="ft-stat-value" id="ft-today-total">–</div>
+              <div class="ft-stat-label">Total today</div>
+            </div>
+            <div class="ft-stat-card">
+              <div class="ft-stat-value" id="ft-today-count">0</div>
+              <div class="ft-stat-label">Sessions</div>
+            </div>
+            <div class="ft-stat-card">
+              <div class="ft-stat-value" id="ft-today-longest">–</div>
+              <div class="ft-stat-label">Longest</div>
+            </div>
+          </div>
+
+          <!-- Sessions -->
+          <!-- Day timeline -->
+          <div id="ft-timeline" style="display:none"></div>
+
+          <div class="ft-sessions-section">
+            <div class="ft-sessions-header">
+              <div class="ft-section-header">Today's sessions</div>
+              <button class="ft-clear-btn" onclick="ftClearToday()">Clear today</button>
+            </div>
+            <div id="ft-sessions-list"></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ── Page: OneNote ────────────────────────────────── -->
+      <div id="page-onenote" class="page" style="display:none">
+        <div id="onenote-page">
+          <div class="on-header">
+            <h2 class="on-title">OneNote</h2>
+            <p class="on-subtitle">Create and send notes to your OneNote desktop app via COM.</p>
+          </div>
+          <div class="on-card">
+            <div class="on-card-title">Hello World test</div>
+            <p class="on-card-desc">Creates a new page titled <strong>Hello World</strong> in the first available section of your open OneNote notebook.</p>
+            <button class="on-btn" id="on-test-btn" onclick="onTestNote()">Create Hello World note</button>
+            <div class="on-result" id="on-result" style="display:none"></div>
+          </div>
+
+          <div class="on-card">
+            <div class="on-card-title">Browse notebooks</div>
+            <p class="on-card-desc">View your notebooks, sections, and pages from the running OneNote desktop app.</p>
+            <button class="on-btn" id="on-browse-btn" onclick="loadOneNoteHierarchy()">Load notebooks</button>
+            <div id="on-hierarchy"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Page: Tools & MCP ─────────────────────────────── -->
+      <div id="page-tools" class="page" style="display:none">
+        <div id="tools-page">
+
+          <div class="tools-hdr">
+            <h2 class="tools-title">Tools & MCP</h2>
+            <p class="tools-sub">App capabilities, MCP tools exposed to Claude Desktop, and API explorer</p>
+          </div>
+
+          <!-- Claude Desktop setup -->
+          <div class="tools-setup-card">
+            <div class="tools-setup-bar">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accentl);flex:none"><rect x="2" y="3" width="20" height="14" rx="2"/><polyline points="8 21 12 17 16 21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              <div>
+                <div class="tools-setup-title">Claude Desktop integration</div>
+                <div class="tools-setup-note">Add all five entries to <code>claude_desktop_config.json</code></div>
+              </div>
+              <button class="tools-copy-btn" onclick="toolsCopyConfig(this)">Copy</button>
+            </div>
+            <pre class="tools-config-pre" id="tools-config-pre"></pre>
+          </div>
+
+          <!-- Recordings -->
+          <div class="tools-group-label">
+            <span>Recordings</span>
+            <span class="tools-group-src">hub-recordings · mcp/recordings_server.py</span>
+          </div>
+          <div class="tools-grid">
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">list_recordings</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Browse recordings — date range, project, or meeting filters.</p>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsRun('GET','/api/recordings',null,'tr-list')">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-list"></pre>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">get_recording</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Full detail for one recording — transcript, notes, speaker data.</p>
+              <div class="tool-params">
+                <input class="tool-input" id="tr-get-id" type="number" placeholder="Recording ID" min="1" />
+              </div>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsRunId('tr-get-id','/api/recordings/{id}/transcript','tr-get')">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-get"></pre>
+            </div>
+
+            <div class="tool-card tool-card--wide">
+              <div class="tool-card-top">
+                <code class="tool-name">search_recordings</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Keyword search across projects and meeting names. (Full transcript search runs in the MCP layer directly against SQLite.)</p>
+              <div class="tool-params">
+                <input class="tool-input tool-input--wide" id="tr-search-q" type="text" placeholder="Search keyword…" />
+              </div>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsSearchLocal()">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-search"></pre>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">transcribe_recording</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Run Whisper-1 transcription on a recording's WAV file and save the result to the database. Works without the app running. Requires OPENAI_API_KEY.</p>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">write_notes</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Persist notes written by Claude to the database for a recording. Use after reading the transcript with get_recording.</p>
+            </div>
+
+          </div>
+
+          <!-- Focus Time -->
+          <div class="tools-group-label">
+            <span>Focus Time</span>
+            <span class="tools-group-src">hub-focus · mcp/focus_server.py</span>
+          </div>
+          <div class="tools-grid">
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">get_focus_stats</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Daily focus totals (hours + session count), last 30 days.</p>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsFocusStats()">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-focus"></pre>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">get_work_sessions</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Individual session rows — start/end/duration — for a date.</p>
+              <div class="tool-params">
+                <input class="tool-input" id="tr-ws-date" type="date" />
+              </div>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsWorkSessions()">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-ws"></pre>
+            </div>
+
+          </div>
+
+          <!-- Projects -->
+          <div class="tools-group-label">
+            <span>Projects</span>
+            <span class="tools-group-src">hub-projects · mcp/projects_server.py</span>
+          </div>
+          <div class="tools-grid">
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">list_projects</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">All projects with recording count, duration, last recording.</p>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsRun('GET','/api/projects',null,'tr-proj-list')">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-proj-list"></pre>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">assign_recording_to_project</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Link a recording to a project by name. Empty name = unassign.</p>
+              <div class="tool-params">
+                <input class="tool-input" id="tr-assign-rid" type="number" placeholder="Recording ID" min="1" />
+                <input class="tool-input" id="tr-assign-proj" type="text" placeholder="Project name" />
+              </div>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsAssignProject()">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-assign"></pre>
+            </div>
+
+          </div>
+
+          <!-- Recorder control -->
+          <div class="tools-group-label">
+            <span>Recorder Control</span>
+            <span class="tools-group-src">server.py · app must be running</span>
+          </div>
+          <div class="tools-grid">
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">list_devices</code>
+                <span class="tool-badge badge-api">API</span>
+              </div>
+              <p class="tool-desc">Enumerate available audio input devices (index + name).</p>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsRun('GET','/api/devices',null,'tr-dev')">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-dev"></pre>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">start_recording</code>
+                <span class="tool-badge badge-api">API</span>
+              </div>
+              <p class="tool-desc">Start a recording session. Source: mic / app / both.</p>
+              <div class="tool-params">
+                <select class="tool-select" id="tr-start-src">
+                  <option value="both">both</option>
+                  <option value="mic">mic</option>
+                  <option value="app">app</option>
+                </select>
+              </div>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsStartRec()">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-start"></pre>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">stop_recording</code>
+                <span class="tool-badge badge-api">API</span>
+              </div>
+              <p class="tool-desc">Stop the active recording. Triggers transcription automatically.</p>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsRun('POST','/api/record/stop',{},'tr-stop')">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-stop"></pre>
+            </div>
+
+          </div>
+
+          <!-- AI Processing -->
+          <div class="tools-group-label">
+            <span>AI Processing</span>
+            <span class="tools-group-src">server.py · app must be running</span>
+          </div>
+          <div class="tools-grid">
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">transcribe_recording</code>
+                <span class="tool-badge badge-api">API</span>
+              </div>
+              <p class="tool-desc">Trigger Whisper transcription for a recording by ID.</p>
+              <div class="tool-params">
+                <input class="tool-input" id="tr-tx-id" type="number" placeholder="Recording ID" min="1" />
+              </div>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsRunId('tr-tx-id','/api/recordings/{id}/transcribe','tr-tx','POST')">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-tx"></pre>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">generate_notes</code>
+                <span class="tool-badge badge-api">API</span>
+              </div>
+              <p class="tool-desc">Run DeepSeek bullet-notes generation (action items, key points).</p>
+              <div class="tool-params">
+                <input class="tool-input" id="tr-notes-id" type="number" placeholder="Recording ID" min="1" />
+              </div>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsRunId('tr-notes-id','/api/recordings/{id}/generate-notes','tr-notes','POST')">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-notes"></pre>
+            </div>
+
+          </div>
+
+          <!-- Calendar -->
+          <div class="tools-group-label">
+            <span>Calendar</span>
+            <span class="tools-group-src">hub-calendar · mcp/calendar_server.py · requires desktop Outlook</span>
+          </div>
+          <div class="tools-grid">
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">get_calendar_events</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Fetch upcoming Outlook meetings via COM. Works without the app running.</p>
+              <div class="tool-params">
+                <input class="tool-input" id="tr-cal-days" type="number" placeholder="Days ahead" min="0" max="30" value="1" style="width:100px" />
+              </div>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsCalendar()">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-cal"></pre>
+            </div>
+
+          </div>
+
+          <!-- OneNote -->
+          <div class="tools-group-label">
+            <span>OneNote</span>
+            <span class="tools-group-src">hub-onenote · mcp/onenote_server.py · requires desktop OneNote</span>
+          </div>
+          <div class="tools-grid">
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">get_onenote_hierarchy</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">List notebooks, sections, and pages from OneNote via COM.</p>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsRun('GET','/api/onenote/hierarchy',null,'tr-on-hier')">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-on-hier"></pre>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">create_recording_page</code>
+                <span class="tool-badge badge-mcp">MCP</span>
+              </div>
+              <p class="tool-desc">Push a recording's notes to OneNote. Title = meeting + date. Use via Claude Desktop MCP.</p>
+            </div>
+
+            <div class="tool-card">
+              <div class="tool-card-top">
+                <code class="tool-name">create_page</code>
+                <span class="tool-badge badge-api">API</span>
+              </div>
+              <p class="tool-desc">Create a OneNote page via COM (Hello World test).</p>
+              <div class="tool-actions">
+                <button class="tool-run-btn" onclick="toolsRun('POST','/api/onenote/test',{},'tr-onenote')">Try →</button>
+              </div>
+              <pre class="tool-out" id="tr-onenote"></pre>
+            </div>
+
+          </div>
+
+        </div>
+      </div>
+
     </div><!-- #content -->
   </div><!-- #app-body -->
+
+  <!-- ── Projects modal ─────────────────────────────────── -->
+  <div id="proj-modal-overlay" class="modal-overlay" style="display:none" onclick="if(event.target===this)projCloseModal()">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h3 class="modal-title" id="proj-modal-title">New project</h3>
+      </div>
+      <div class="modal-body">
+        <div class="modal-field">
+          <label class="modal-label">Name <span class="modal-required">*</span></label>
+          <input id="proj-m-name" type="text" class="modal-input" placeholder="Project name" />
+        </div>
+        <div class="modal-field">
+          <label class="modal-label">Status</label>
+          <div class="modal-segmented" id="proj-m-status">
+            <button class="seg-btn active" data-value="Active" type="button" onclick="projSetStatus('Active')">Active</button>
+            <button class="seg-btn" data-value="On Hold" type="button" onclick="projSetStatus('On Hold')">On Hold</button>
+            <button class="seg-btn" data-value="Done" type="button" onclick="projSetStatus('Done')">Done</button>
+          </div>
+        </div>
+        <div class="modal-field">
+          <label class="modal-label">Client</label>
+          <input id="proj-m-client" type="text" class="modal-input" placeholder="Client or organisation" />
+        </div>
+        <div class="modal-field">
+          <label class="modal-label">Color</label>
+          <div id="proj-m-colors" class="color-picker-row"></div>
+        </div>
+        <div class="modal-field">
+          <label class="modal-label">Description</label>
+          <textarea id="proj-m-description" class="modal-textarea" rows="2" placeholder="Brief description…"></textarea>
+        </div>
+        <div class="modal-field">
+          <label class="modal-label">Objective</label>
+          <textarea id="proj-m-objective" class="modal-textarea" rows="2" placeholder="Main objective…"></textarea>
+        </div>
+        <div class="modal-field">
+          <label class="modal-label">Phases</label>
+          <div class="chips-input-wrap">
+            <div class="chips-list" id="proj-m-phases-chips"></div>
+            <input id="proj-m-phases-input" type="text" class="chips-input" placeholder="Add phase, press Enter…" />
+          </div>
+        </div>
+        <div class="modal-field">
+          <label class="modal-label">Streams</label>
+          <div class="chips-input-wrap">
+            <div class="chips-list" id="proj-m-streams-chips"></div>
+            <input id="proj-m-streams-input" type="text" class="chips-input" placeholder="Add stream, press Enter…" />
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <span class="modal-error" id="proj-m-error"></span>
+        <button class="modal-cancel-btn" type="button" onclick="projCloseModal()">Cancel</button>
+        <button class="modal-save-btn" id="proj-m-save" type="button" onclick="projModalSave()">Create</button>
+      </div>
+    </div>
+  </div>
 
 </div><!-- #root -->
 

@@ -7,8 +7,8 @@ from .base import BaseAgent
 
 _SYSTEM = (
     '''
-    Rol:Eres el asistente de SmartRecorder, orquestador de varios agentes. 
-    SmartRecorder es una aplicación que hace grabaciones que hace transcripciones.
+    Rol:Eres el asistente de My Working Hub, orquestador de varios agentes.
+    My Working Hub es una aplicación de asistencia de trabajo que incluye grabaciones y transcripciones.
     
     Instrucciones: 
     - Ayuda al usuario respondiendo preguntas en base a la base de conocimiento de grabaciones de reuniones y con acciones a realizar en la aplicación.

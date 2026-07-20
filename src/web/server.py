@@ -1,4 +1,4 @@
-"""FastAPI web server for SmartRecorder."""
+"""FastAPI web server for My Working Hub."""
 import asyncio
 import json
 import logging
@@ -14,13 +14,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from src import db
+from src import db, focus_db
 from src.recorder import Recorder, list_input_devices, FOLDER
 from src.transcriber import Transcriber
 from src.live_transcriber import LiveTranscriber
 from src.agents.agent_orchestrator import ChatAgent
-from src.agents.agent_summarization import SummarizationAgent
 from src.agents.agent_notes import NotesAgent
+from src.jiggler import MouseJiggler
 from src.web import state
 
 log = logging.getLogger(__name__)
@@ -33,8 +33,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 _transcriber = Transcriber()
 _live_transcriber = LiveTranscriber()
 _chat_agent = ChatAgent()
-_sum_agent = SummarizationAgent()
 _notes_agent = NotesAgent()
+_jiggler = MouseJiggler()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -76,27 +76,6 @@ def _transcribe_done_cb(recording_id: int, text: str | None, language: str) -> N
             "ok": text is not None,
             "language": language,
         })
-        if text:
-            state.summarizing.add(recording_id)
-            await state.broadcast({"type": "job_started", "job": "summarize", "id": recording_id})
-            _sum_agent.summarize_async(recording_id, text, language, _summarize_done_cb)
-
-            state.notes_generating.add(recording_id)
-            await state.broadcast({"type": "job_started", "job": "notes", "id": recording_id})
-            _notes_agent.generate_notes_async(recording_id, text, language, _notes_done_cb)
-
-    asyncio.run_coroutine_threadsafe(_cb(), state.loop)
-
-
-def _summarize_done_cb(recording_id: int, summary: str | None) -> None:
-    async def _cb():
-        state.summarizing.discard(recording_id)
-        await state.broadcast({
-            "type": "summarized",
-            "id": recording_id,
-            "ok": summary is not None,
-        })
-
     asyncio.run_coroutine_threadsafe(_cb(), state.loop)
 
 
@@ -154,6 +133,10 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(_level_broadcaster())
     _start_monitor()
 
+    sess = focus_db.start_work_session()
+    state.focus_session_id = sess["id"]
+    state.focus_session_start = sess["start_time"]
+
     yield
 
     task.cancel()
@@ -164,6 +147,9 @@ async def lifespan(app: FastAPI):
     _stop_monitor()
     if state.stop_event:
         state.stop_event.set()
+    if state.focus_session_id is not None:
+        focus_db.end_work_session(state.focus_session_id)
+        state.focus_session_id = None
 
 
 app = FastAPI(lifespan=lifespan)
@@ -212,7 +198,6 @@ def get_transcript(rid: int):
     return {
         "corrected": db.get_transcript(rid),
         "raw": db.get_transcript_raw(rid),
-        "summary": db.get_summary(rid),
         "language": db.get_language(rid),
         "speaker": db.get_transcript_speaker(rid),
         "notes": db.get_notes(rid),
@@ -254,20 +239,6 @@ async def transcribe_recording(rid: int):
     state.transcribing.add(rid)
     await state.broadcast({"type": "job_started", "job": "transcribe", "id": rid})
     _transcriber.transcribe_async(rid, rec["filepath"], _transcribe_done_cb)
-    return {"ok": True}
-
-
-@app.post("/api/recordings/{rid}/summarize")
-async def summarize_recording(rid: int):
-    text = db.get_transcript(rid)
-    if not text:
-        raise HTTPException(400, "no transcript available")
-    if rid in state.summarizing:
-        return {"ok": False, "reason": "already_running"}
-    state.summarizing.add(rid)
-    language = db.get_language(rid) or "unknown"
-    await state.broadcast({"type": "job_started", "job": "summarize", "id": rid})
-    _sum_agent.summarize_async(rid, text, language, _summarize_done_cb)
     return {"ok": True}
 
 
@@ -340,6 +311,14 @@ async def record_stop():
     if state.stop_event:
         state.stop_event.set()
     return {"ok": True}
+
+
+@app.get("/api/recording/status")
+def recording_status():
+    return {
+        "recording": state.recording,
+        "recording_start": state.recording_start,
+    }
 
 
 # ── REST: import ─────────────────────────────────────────────────────────────
@@ -447,6 +426,129 @@ def serve_audio(rid: int):
     return FileResponse(rec["filepath"], media_type="audio/wav")
 
 
+# ── REST: work sessions (Focus Time) ─────────────────────────────────────────
+
+@app.get("/api/work-sessions/current")
+def get_current_work_session():
+    if state.focus_session_id is None:
+        return None
+    return {"id": state.focus_session_id, "start_time": state.focus_session_start}
+
+
+@app.post("/api/work-sessions")
+def create_work_session():
+    sess = focus_db.start_work_session()
+    state.focus_session_id = sess["id"]
+    state.focus_session_start = sess["start_time"]
+    return sess
+
+
+@app.patch("/api/work-sessions/{session_id}/end")
+def end_work_session(session_id: int):
+    focus_db.end_work_session(session_id)
+    return {"ok": True}
+
+
+@app.get("/api/work-sessions")
+def get_work_sessions(date: str | None = None):
+    return focus_db.list_work_sessions(date)
+
+
+@app.delete("/api/work-sessions")
+def delete_work_sessions(date: str):
+    count = focus_db.delete_sessions_by_date(date)
+    return {"deleted": count}
+
+
+# ── REST: jiggler ────────────────────────────────────────────────────────────
+
+@app.post("/api/jiggler/start")
+def jiggler_start():
+    def _auto_stop():
+        asyncio.run_coroutine_threadsafe(
+            state.broadcast({"type": "jiggler_stopped", "reason": "user_input"}),
+            state.loop,
+        )
+    _jiggler.start(interval=3, on_auto_stop=_auto_stop)
+    return {"ok": True, "running": True}
+
+
+@app.post("/api/jiggler/stop")
+def jiggler_stop():
+    _jiggler.stop()
+    return {"ok": True, "running": False}
+
+
+@app.get("/api/jiggler/status")
+def jiggler_status():
+    return {"running": _jiggler.running}
+
+
+# ── REST: projects ───────────────────────────────────────────────────────────
+
+class ProjectCreate(BaseModel):
+    name: str
+    description: str = ""
+    status: str = "Active"
+    client: str = ""
+    objective: str = ""
+    phases: list[str] = []
+    streams: list[str] = []
+    color: str = ""
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    status: str | None = None
+    client: str | None = None
+    objective: str | None = None
+    phases: list[str] | None = None
+    streams: list[str] | None = None
+    color: str | None = None
+
+
+@app.get("/api/projects")
+def get_projects():
+    return db.list_projects()
+
+
+@app.post("/api/projects")
+def create_project_endpoint(body: ProjectCreate):
+    if not body.name.strip():
+        raise HTTPException(400, "name is required")
+    if body.status not in ("Active", "On Hold", "Done"):
+        raise HTTPException(400, "status must be Active, On Hold, or Done")
+    try:
+        return db.create_project(
+            name=body.name.strip(),
+            description=body.description,
+            status=body.status,
+            client=body.client,
+            objective=body.objective,
+            phases=body.phases,
+            streams=body.streams,
+            color=body.color,
+        )
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.patch("/api/projects/{pid}")
+def update_project_endpoint(pid: int, body: ProjectUpdate):
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "name" in updates and not updates["name"].strip():
+        raise HTTPException(400, "name cannot be empty")
+    db.update_project(pid, **updates)
+    return {"ok": True}
+
+
+@app.delete("/api/projects/{pid}")
+def delete_project_endpoint(pid: int):
+    db.delete_project(pid)
+    return {"ok": True}
+
+
 # ── WebSocket: /ws/app ────────────────────────────────────────────────────────
 
 @app.websocket("/ws/app")
@@ -459,7 +561,6 @@ async def ws_app(ws: WebSocket):
             "recording": state.recording,
             "recording_start": state.recording_start,
             "transcribing": list(state.transcribing),
-            "summarizing": list(state.summarizing),
             "notes_generating": list(state.notes_generating),
         }))
         while True:
@@ -526,6 +627,44 @@ async def ws_chat(ws: WebSocket):
         pass
     except Exception:
         log.exception("Chat WebSocket error")
+
+
+# ── REST: Outlook calendar ────────────────────────────────────────────────────
+
+@app.get("/api/calendar/events")
+async def calendar_events(days: int = 1):
+    import asyncio
+    from src.outlook import get_events
+    try:
+        events = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: get_events(days_ahead=days)
+        )
+        return {"ok": True, "events": events}
+    except Exception as e:
+        log.warning("Calendar fetch failed: %s", e)
+        return {"ok": False, "error": str(e), "events": []}
+
+
+# ── REST: OneNote ─────────────────────────────────────────────────────────────
+
+@app.post("/api/onenote/test")
+async def onenote_test():
+    from src.onenote import create_page
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: create_page("Hello World", "Hello from My Working Hub!")
+    )
+    if not result["ok"]:
+        raise HTTPException(500, result["error"])
+    return result
+
+
+@app.get("/api/onenote/hierarchy")
+async def onenote_hierarchy():
+    from src.onenote import get_hierarchy
+    result = await asyncio.get_event_loop().run_in_executor(None, get_hierarchy)
+    if not result["ok"]:
+        raise HTTPException(500, result["error"])
+    return result
 
 
 # ── Static files — MUST be last ───────────────────────────────────────────────

@@ -1,4 +1,5 @@
 import datetime
+import json
 import logging
 import os
 import sqlite3
@@ -16,7 +17,7 @@ def _txt_path(wav_path: str) -> str:
     return os.path.splitext(wav_path)[0] + ".txt"
 
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 9
 
 
 def _init():
@@ -108,6 +109,29 @@ def _init():
                 pass
             conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
 
+        if db_version < 8:
+            log.info("Migrating schema to v8 (projects table)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS projects (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT    NOT NULL UNIQUE,
+                    description TEXT    NOT NULL DEFAULT '',
+                    status      TEXT    NOT NULL DEFAULT 'Active',
+                    client      TEXT    NOT NULL DEFAULT '',
+                    objective   TEXT    NOT NULL DEFAULT '',
+                    phases      TEXT    NOT NULL DEFAULT '[]',
+                    streams     TEXT    NOT NULL DEFAULT '[]',
+                    color       TEXT    NOT NULL DEFAULT '',
+                    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
+
+        if db_version < 9:
+            log.info("Migrating schema to v9 (clear summary column data)")
+            conn.execute("UPDATE recordings SET summary = NULL")
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
+
         # Migrate any existing .txt sidecar files into the DB
         rows = conn.execute(
             "SELECT filepath FROM recordings WHERE transcript IS NULL"
@@ -182,16 +206,6 @@ def get_transcript_raw(recording_id: int) -> str | None:
     return row[0] if row else None
 
 
-def save_summary(recording_id: int, text: str) -> None:
-    """Persist the generated summary for a recording."""
-    log.info("save_summary  chars=%d  id=%d", len(text), recording_id)
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "UPDATE recordings SET summary = ? WHERE id = ?",
-            (text, recording_id),
-        )
-
-
 def save_language(recording_id: int, language: str) -> None:
     """Persist the detected language for a recording."""
     log.info("save_language  language=%s  id=%d", language, recording_id)
@@ -207,16 +221,6 @@ def get_language(recording_id: int) -> str | None:
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT language FROM recordings WHERE id = ?", (recording_id,)
-        ).fetchone()
-    return row[0] if row else None
-
-
-def get_summary(recording_id: int) -> str | None:
-    """Return the stored summary for a recording, or None if not yet generated."""
-    log.debug("get_summary  id=%d", recording_id)
-    with sqlite3.connect(DB_PATH) as conn:
-        row = conn.execute(
-            "SELECT summary FROM recordings WHERE id = ?", (recording_id,)
         ).fetchone()
     return row[0] if row else None
 
@@ -285,7 +289,6 @@ def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
         "channels": channels,
         "file_size": file_size,
         "has_transcript": False,
-        "has_summary": False,
         "has_speaker": False,
         "project": "",
         "meeting": "",
@@ -309,7 +312,6 @@ def load_metadata(folder: str) -> list[dict]:
         rows = conn.execute(
             "SELECT id, filepath, source, start_time, end_time, duration, sample_rate, channels, file_size, "
             "(transcript IS NOT NULL) as has_transcript, project, meeting, "
-            "(summary IS NOT NULL) as has_summary, "
             "language, "
             "(transcript_speaker IS NOT NULL) as has_speaker "
             "FROM recordings ORDER BY start_time DESC"
@@ -328,7 +330,7 @@ def load_metadata(folder: str) -> list[dict]:
     recs = []
     missing_count = 0
     for row in rows:
-        row_id, fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, has_summary, language, has_speaker = row
+        row_id, fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, language, has_speaker = row
         file_missing = False
         if not os.path.exists(fp):
             basename = os.path.basename(fp)
@@ -351,7 +353,6 @@ def load_metadata(folder: str) -> list[dict]:
             "channels": channels,
             "file_size": fsize,
             "has_transcript": bool(has_transcript),
-            "has_summary": bool(has_summary),
             "has_speaker": bool(has_speaker),
             "project": project or "",
             "meeting": meeting or "",
@@ -428,3 +429,93 @@ def delete_metadata(recording_id: int) -> None:
     log.info("delete_metadata  id=%d", recording_id)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM recordings WHERE id = ?", (recording_id,))
+
+
+# ── Projects ──────────────────────────────────────────────────────────────────
+
+def list_projects() -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute("""
+            SELECT p.id, p.name, p.description, p.status, p.client, p.objective,
+                   p.phases, p.streams, p.color, p.created_at,
+                   COUNT(r.id) as recording_count,
+                   COALESCE(SUM(r.duration), 0) as total_duration,
+                   MAX(r.start_time) as last_recording
+            FROM projects p
+            LEFT JOIN recordings r ON r.project = p.name
+            GROUP BY p.id
+            ORDER BY p.name
+        """).fetchall()
+    result = []
+    for row in rows:
+        pid, name, desc, status, client, obj, phases, streams, color, created_at, rec_count, total_dur, last_rec = row
+        result.append({
+            "id": pid,
+            "name": name,
+            "description": desc,
+            "status": status,
+            "client": client,
+            "objective": obj,
+            "phases": json.loads(phases or "[]"),
+            "streams": json.loads(streams or "[]"),
+            "color": color,
+            "created_at": created_at,
+            "recording_count": rec_count,
+            "total_duration": total_dur or 0,
+            "last_recording": last_rec,
+        })
+    return result
+
+
+def create_project(name: str, description: str = "", status: str = "Active",
+                   client: str = "", objective: str = "",
+                   phases: list | None = None, streams: list | None = None,
+                   color: str = "") -> dict:
+    phases_json = json.dumps(phases or [])
+    streams_json = json.dumps(streams or [])
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute(
+                "INSERT INTO projects (name, description, status, client, objective, phases, streams, color) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (name, description, status, client, objective, phases_json, streams_json, color),
+            )
+            pid = cur.lastrowid
+    except sqlite3.IntegrityError:
+        raise ValueError(f"Project name already exists: {name!r}")
+    return {
+        "id": pid,
+        "name": name,
+        "description": description,
+        "status": status,
+        "client": client,
+        "objective": objective,
+        "phases": phases or [],
+        "streams": streams or [],
+        "color": color,
+        "recording_count": 0,
+        "total_duration": 0,
+        "last_recording": None,
+    }
+
+
+def update_project(pid: int, **fields) -> None:
+    allowed = {"name", "description", "status", "client", "objective", "phases", "streams", "color"}
+    updates = {}
+    for k, v in fields.items():
+        if k not in allowed:
+            continue
+        if k in ("phases", "streams") and isinstance(v, list):
+            v = json.dumps(v)
+        updates[k] = v
+    if not updates:
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [pid]
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(f"UPDATE projects SET {set_clause} WHERE id = ?", values)
+
+
+def delete_project(pid: int) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM projects WHERE id = ?", (pid,))

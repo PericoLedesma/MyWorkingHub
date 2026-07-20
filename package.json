@@ -1,7 +1,7 @@
 {
-  "name": "smartrecorder",
+  "name": "my-working-hub",
   "version": "1.0.0",
-  "description": "SmartRecorder Desktop Widget",
+  "description": "My Working Hub Desktop Widget",
   "main": "electron/main.js",
   "scripts": {
     "start": "electron ."
