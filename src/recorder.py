@@ -1,4 +1,5 @@
 import datetime
+import logging
 import os
 import threading
 
@@ -7,6 +8,8 @@ import pyaudiowpatch as pyaudio
 import soundfile as sf
 
 from .db import DATA_DIR, save_metadata
+
+log = logging.getLogger(__name__)
 
 FOLDER = os.path.join(DATA_DIR, "recordings")
 os.makedirs(FOLDER, exist_ok=True)
@@ -60,8 +63,80 @@ def _mix_audio(
 
     # duplicate mono mic across all channels before mixing
     mic_stereo = np.stack([mic_resampled] * app_channels, axis=1)
-    length = min(len(mic_stereo), len(app_audio))  # trim to the shorter stream
-    return 0.5 * mic_stereo[:length] + 0.5 * app_audio[:length], app_rate
+
+    # Mic is authoritative for length — pad loopback with silence if it's shorter
+    # (WASAPI loopback delivers no chunks during silence, so app_audio can be much
+    # shorter than the actual recording time; we must never truncate the mic).
+    mic_len = len(mic_stereo)
+    app_len = len(app_audio)
+    if app_len < mic_len:
+        app_audio = np.vstack([app_audio, np.zeros((mic_len - app_len, app_channels), dtype=np.float32)])
+    elif mic_len < app_len:
+        mic_stereo = np.vstack([mic_stereo, np.zeros((app_len - mic_len, app_channels), dtype=np.float32)])
+
+    return 0.5 * mic_stereo + 0.5 * app_audio, app_rate
+
+
+def _get_all_loopbacks(pa: pyaudio.PyAudio) -> list[dict]:
+    """Return every available WASAPI loopback device (one per output device)."""
+    try:
+        devices = list(pa.get_loopback_device_info_generator())
+        log.info("Loopback devices found: %s", [d["name"] for d in devices])
+        return devices
+    except Exception as e:
+        log.warning("No loopback devices: %s", e)
+        return []
+
+
+def _merge_loopbacks(
+    streams: list[tuple[list[np.ndarray], int, int]],
+) -> tuple[np.ndarray, int, int] | None:
+    """Merge multiple loopback streams (different rates/channels OK) into one array.
+
+    Uses the first non-empty stream as the reference rate/channels.
+    All others are resampled and channel-converted to match, then averaged.
+    Returns (audio_2d, rate, channels) or None if all streams are empty.
+    """
+    filled = [(chunks, rate, ch) for chunks, rate, ch in streams if chunks]
+    if not filled:
+        return None
+
+    ref_rate, ref_ch = filled[0][1], filled[0][2]
+    arrays: list[np.ndarray] = []
+
+    for chunks, rate, ch in filled:
+        audio = np.concatenate(chunks).reshape(-1, ch).astype(np.float32)
+
+        if rate != ref_rate:
+            n = int(len(audio) * ref_rate / rate)
+            resampled = np.zeros((n, ch), dtype=np.float32)
+            for c in range(ch):
+                resampled[:, c] = np.interp(
+                    np.linspace(0, len(audio) - 1, n),
+                    np.arange(len(audio)),
+                    audio[:, c],
+                )
+            audio = resampled
+
+        if ch < ref_ch:
+            audio = np.hstack([audio[:, :1]] * ref_ch)
+        elif ch > ref_ch:
+            audio = audio[:, :ref_ch]
+
+        arrays.append(audio)
+
+    if len(arrays) == 1:
+        return arrays[0], ref_rate, ref_ch
+
+    max_len = max(len(a) for a in arrays)
+    padded = []
+    for a in arrays:
+        if len(a) < max_len:
+            a = np.vstack([a, np.zeros((max_len - len(a), ref_ch), dtype=np.float32)])
+        padded.append(a)
+
+    merged = np.mean(np.stack(padded, axis=0), axis=0).astype(np.float32)
+    return merged, ref_rate, ref_ch
 
 
 class Recorder:
@@ -73,18 +148,41 @@ class Recorder:
         self._set_app_level = set_app_level
         self._on_done = on_done  # signature: (meta | None, reason: str | None)
         self.mic_device_index: int | None = None
-        # Live transcription buffer — drained periodically by LiveTranscriber
+        # Live transcription buffers — drained periodically by LiveTranscriber
         self._live_lock = threading.Lock()
         self._live_chunks: list[np.ndarray] = []
         self._live_rate: int = 0
         self._live_channels: int = 1
+        # Separate app-audio buffer used when source=both (enables speaker labeling)
+        self._live_app_lock = threading.Lock()
+        self._live_app_chunks: list[np.ndarray] = []
+        self._live_app_rate: int = 0
+        self._live_app_channels: int = 1
+        self._live_source: str = "mic"
 
-    def drain_live_chunks(self) -> tuple[list[np.ndarray], int, int]:
-        """Return (chunks_since_last_drain, rate, channels) and clear the buffer."""
+    def drain_live_chunks(self) -> list[tuple[str, list[np.ndarray], int, int]]:
+        """Return [(label, chunks, rate, channels)] per audio source and clear the buffers.
+
+        When source=both, returns two entries labeled "You" (mic) and "Them" (app).
+        Otherwise returns a single entry with an empty label.
+        """
         with self._live_lock:
-            chunks = self._live_chunks[:]
+            mic_chunks = self._live_chunks[:]
             self._live_chunks.clear()
-            return chunks, self._live_rate, self._live_channels
+
+        if self._live_source != "both":
+            return [("", mic_chunks, self._live_rate, self._live_channels)]
+
+        with self._live_app_lock:
+            app_chunks = self._live_app_chunks[:]
+            self._live_app_chunks.clear()
+
+        sources: list[tuple[str, list[np.ndarray], int, int]] = []
+        if mic_chunks:
+            sources.append(("You", mic_chunks, self._live_rate, self._live_channels))
+        if app_chunks:
+            sources.append(("Them", app_chunks, self._live_app_rate, self._live_app_channels))
+        return sources
 
     def _get_loopback(self, pa: pyaudio.PyAudio) -> dict | None:
         """Return the WASAPI loopback device that mirrors the default system output."""
@@ -123,6 +221,7 @@ class Recorder:
         rate = int(mic_info["defaultSampleRate"])
         self._live_rate = rate
         self._live_channels = 1
+        self._live_source = "mic"
         start_time = datetime.datetime.now()
         filepath = _make_filepath()
         chunks: list[np.ndarray] = []
@@ -146,82 +245,131 @@ class Recorder:
                 stream_callback=cb,
             )
             stream.start_stream()
-            self._stop.wait()
-            stream.stop_stream()
-            stream.close()
-        except Exception:
+        except Exception as e:
+            log.error("mic stream open failed: %s", e)
+            pa.terminate()
             self._on_done(None, "mic_stream_error")
             return
-        finally:
-            pa.terminate()
 
-        end_time = datetime.datetime.now()
-        if chunks:
-            sf.write(filepath, np.concatenate(chunks), rate)
-            self._on_done(save_metadata(filepath, "mic", start_time, end_time, rate, 1), None)
-        else:
-            self._on_done(None, "mic_no_chunks")
-
-    def run_loopback(self):
-        """Record WASAPI loopback (system audio) until stop_event is set."""
-        pa = pyaudio.PyAudio()
-        device = self._get_loopback(pa)
-        if device is None:
-            pa.terminate()
-            self._on_done(None, "loopback_device_missing")
-            return
-
-        # use the device's native rate/channels to avoid quality loss
-        rate, channels = int(device["defaultSampleRate"]), device["maxInputChannels"]
-        self._live_rate = rate
-        self._live_channels = channels
-        start_time = datetime.datetime.now()
-        filepath = _make_filepath()
-        chunks: list[np.ndarray] = []
-
-        def cb(in_data, _fc, _ti, _st):
-            chunk = np.frombuffer(in_data, dtype=np.float32)
-            chunks.append(chunk.copy())
-            with self._live_lock:
-                self._live_chunks.append(chunk.copy())
-            self._set_mic_level(0.0)
-            self._set_app_level(_rms_level(chunk))
-            return None, pyaudio.paContinue
-
+        self._stop.wait()
+        # Close separately so a teardown error never discards already-captured chunks.
         try:
-            stream = pa.open(
-                format=pyaudio.paFloat32,
-                channels=channels,
-                rate=rate,
-                input=True,
-                input_device_index=device["index"],
-                stream_callback=cb,
-            )
-            stream.start_stream()
-            self._stop.wait()
             stream.stop_stream()
             stream.close()
-        except Exception:
-            self._on_done(None, "loopback_stream_error")
-            return
-        finally:
-            pa.terminate()
+        except Exception as e:
+            log.warning("mic stream close error (chunks preserved): %s", e)
+        pa.terminate()
 
         end_time = datetime.datetime.now()
-        if chunks:
-            sf.write(filepath, np.concatenate(chunks).reshape(-1, channels), rate)
-            self._on_done(save_metadata(filepath, "app", start_time, end_time, rate, channels), None)
-        else:
-            self._on_done(None, "loopback_no_chunks")
+        if not chunks:
+            self._on_done(None, "mic_no_chunks")
+            return
+        try:
+            sf.write(filepath, np.concatenate(chunks), rate)
+        except Exception as e:
+            log.error("mic sf.write failed: %s", e)
+            self._on_done(None, "mic_write_error")
+            return
+        try:
+            self._on_done(save_metadata(filepath, "mic", start_time, end_time, rate, 1), None)
+        except Exception as e:
+            # WAV is safely on disk — surface it as a partial success so the UI
+            # can show it and the user can rescan rather than losing the file.
+            log.error("mic save_metadata failed (WAV intact at %s): %s", filepath, e)
+            self._on_done(None, "mic_metadata_error")
 
-    def run_both(self):
-        """Record mic + loopback simultaneously and mix them into one file."""
+    def run_loopback(self):
+        """Record all WASAPI loopback devices until stop_event is set."""
         pa = pyaudio.PyAudio()
-        device = self._get_loopback(pa)
-        if device is None:
+        devices = _get_all_loopbacks(pa)
+        if not devices:
             pa.terminate()
             self._on_done(None, "loopback_device_missing")
             return
+
+        self._live_source = "app"
+        self._set_mic_level(0.0)
+        start_time = datetime.datetime.now()
+        filepath = _make_filepath()
+
+        device_data: list[tuple] = []  # (stream, chunks, rate, channels, name)
+        live_set = False
+
+        for device in devices:
+            rate = int(device["defaultSampleRate"])
+            channels = device["maxInputChannels"]
+            chunks: list[np.ndarray] = []
+            feed_live = not live_set
+
+            def make_cb(buf: list, feed: bool):
+                def cb(in_data, _fc, _ti, _st):
+                    chunk = np.frombuffer(in_data, dtype=np.float32)
+                    buf.append(chunk.copy())
+                    if feed:
+                        with self._live_lock:
+                            self._live_chunks.append(chunk.copy())
+                    self._set_app_level(_rms_level(chunk))
+                    return None, pyaudio.paContinue
+                return cb
+
+            try:
+                stream = pa.open(
+                    format=pyaudio.paFloat32,
+                    channels=channels,
+                    rate=rate,
+                    input=True,
+                    input_device_index=device["index"],
+                    stream_callback=make_cb(chunks, feed_live),
+                )
+                if not live_set:
+                    self._live_rate = rate
+                    self._live_channels = channels
+                    live_set = True
+                device_data.append((stream, chunks, rate, channels, device["name"]))
+            except Exception as e:
+                log.warning("Failed to open loopback '%s': %s", device["name"], e)
+
+        if not device_data:
+            pa.terminate()
+            self._on_done(None, "loopback_stream_error")
+            return
+
+        for stream, _, _, _, _ in device_data:
+            stream.start_stream()
+        self._stop.wait()
+        for stream, _, _, _, _ in device_data:
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                pass
+        pa.terminate()
+
+        for _, chunks, rate, ch, name in device_data:
+            log.info("Loopback '%s': %d chunks (rate=%s ch=%s)", name, len(chunks), rate, ch)
+
+        end_time = datetime.datetime.now()
+        result = _merge_loopbacks([(c, r, ch) for _, c, r, ch, _ in device_data])
+        if result is None:
+            self._on_done(None, "loopback_no_chunks")
+            return
+        audio, rate, channels = result
+        try:
+            sf.write(filepath, audio, rate)
+        except Exception as e:
+            log.error("loopback sf.write failed: %s", e)
+            self._on_done(None, "app_write_error")
+            return
+        try:
+            self._on_done(save_metadata(filepath, "app", start_time, end_time, rate, channels), None)
+        except Exception as e:
+            log.error("loopback save_metadata failed (WAV intact at %s): %s", filepath, e)
+            self._on_done(None, "app_metadata_error")
+
+    def run_both(self):
+        """Record mic + all WASAPI loopback devices, mix into one file."""
+        pa = pyaudio.PyAudio()
+        devices = _get_all_loopbacks(pa)
 
         try:
             mic_info = self._get_mic_device(pa)
@@ -230,37 +378,68 @@ class Recorder:
             self._on_done(None, "mic_device_error")
             return
 
-        app_rate     = int(device["defaultSampleRate"])
-        app_channels = device["maxInputChannels"]
-        mic_rate     = int(mic_info["defaultSampleRate"])
-        # Live transcription captures mic audio (mono) so the local speaker's voice is always heard
+        if not devices:
+            pa.terminate()
+            self.run_mic()
+            return
+
+        mic_rate = int(mic_info["defaultSampleRate"])
         self._live_rate = mic_rate
         self._live_channels = 1
+        self._live_source = "both"
         mic_chunks: list[np.ndarray] = []
-        app_chunks: list[np.ndarray] = []
-        # level vars are shared across two callbacks running on different threads
-        mic_lv = 0.0
-        app_lv = 0.0
+        mic_lv = [0.0]
+        app_lv = [0.0]
         start_time = datetime.datetime.now()
         filepath = _make_filepath()
 
         def mic_cb(in_data, _fc, _ti, _st):
-            nonlocal mic_lv
             chunk = np.frombuffer(in_data, dtype=np.float32)
             mic_chunks.append(chunk.copy())
             with self._live_lock:
                 self._live_chunks.append(chunk.copy())
-            mic_lv = _rms_level(chunk)
-            self._set_mic_level(mic_lv)
+            mic_lv[0] = _rms_level(chunk)
+            self._set_mic_level(mic_lv[0])
             return None, pyaudio.paContinue
 
-        def app_cb(in_data, _fc, _ti, _st):
-            nonlocal app_lv
-            chunk = np.frombuffer(in_data, dtype=np.float32)
-            app_chunks.append(chunk.copy())
-            app_lv = _rms_level(chunk)
-            self._set_app_level(app_lv)
-            return None, pyaudio.paContinue
+        # Open one stream per loopback device; first feeds live app chunks
+        device_data: list[tuple] = []
+        live_app_set = False
+
+        for device in devices:
+            rate = int(device["defaultSampleRate"])
+            channels = device["maxInputChannels"]
+            chunks: list[np.ndarray] = []
+            feed_live = not live_app_set
+
+            def make_app_cb(buf: list, feed: bool):
+                def cb(in_data, _fc, _ti, _st):
+                    chunk = np.frombuffer(in_data, dtype=np.float32)
+                    buf.append(chunk.copy())
+                    if feed:
+                        with self._live_app_lock:
+                            self._live_app_chunks.append(chunk.copy())
+                    app_lv[0] = _rms_level(chunk)
+                    self._set_app_level(app_lv[0])
+                    return None, pyaudio.paContinue
+                return cb
+
+            try:
+                stream = pa.open(
+                    format=pyaudio.paFloat32,
+                    channels=channels,
+                    rate=rate,
+                    input=True,
+                    input_device_index=device["index"],
+                    stream_callback=make_app_cb(chunks, feed_live),
+                )
+                if not live_app_set:
+                    self._live_app_rate = rate
+                    self._live_app_channels = channels
+                    live_app_set = True
+                device_data.append((stream, chunks, rate, channels, device["name"]))
+            except Exception as e:
+                log.warning("Failed to open loopback '%s': %s", device["name"], e)
 
         try:
             mic_stream = pa.open(
@@ -271,40 +450,81 @@ class Recorder:
                 input_device_index=mic_info["index"],
                 stream_callback=mic_cb,
             )
-            app_stream = pa.open(
-                format=pyaudio.paFloat32,
-                channels=app_channels,
-                rate=app_rate,
-                input=True,
-                input_device_index=device["index"],
-                stream_callback=app_cb,
-            )
+        except Exception:
+            for stream, _, _, _, _ in device_data:
+                try: stream.close()
+                except Exception: pass
+            pa.terminate()
+            self._on_done(None, "mic_stream_error")
+            return
+
+        if not device_data:
+            # All loopback opens failed — fall back to mic-only
             mic_stream.start_stream()
-            app_stream.start_stream()
             self._stop.wait()
             mic_stream.stop_stream()
-            app_stream.stop_stream()
             mic_stream.close()
-            app_stream.close()
-        except Exception:
-            self._on_done(None, "stream_open_error")
-            return
-        finally:
             pa.terminate()
+            end_time = datetime.datetime.now()
+            if mic_chunks:
+                try:
+                    sf.write(filepath, np.concatenate(mic_chunks), mic_rate)
+                    self._on_done(save_metadata(filepath, "mic", start_time, end_time, mic_rate, 1), None)
+                except Exception:
+                    self._on_done(None, "mic_write_error")
+            else:
+                self._on_done(None, "mic_no_chunks")
+            return
+
+        mic_stream.start_stream()
+        for stream, _, _, _, _ in device_data:
+            stream.start_stream()
+
+        self._stop.wait()
+
+        mic_stream.stop_stream()
+        mic_stream.close()
+        for stream, _, _, _, _ in device_data:
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                pass
+        pa.terminate()
+
+        for _, chunks, rate, ch, name in device_data:
+            log.info("Loopback '%s': %d chunks (rate=%s ch=%s)", name, len(chunks), rate, ch)
 
         end_time = datetime.datetime.now()
-        if mic_chunks and app_chunks:
-            mixed, rate = _mix_audio(mic_chunks, app_chunks, app_rate, app_channels, mic_rate)
-            sf.write(filepath, mixed, rate)
-            self._on_done(save_metadata(filepath, "both", start_time, end_time, rate, app_channels), None)
-        elif mic_chunks:
-            sf.write(filepath, np.concatenate(mic_chunks), mic_rate)
-            self._on_done(save_metadata(filepath, "mic", start_time, end_time, mic_rate, 1), None)
-        elif app_chunks:
-            sf.write(filepath, np.concatenate(app_chunks).reshape(-1, app_channels), app_rate)
-            self._on_done(save_metadata(filepath, "app", start_time, end_time, app_rate, app_channels), None)
-        else:
-            self._on_done(None, "both_no_chunks")
+        try:
+            loopback = _merge_loopbacks([(c, r, ch) for _, c, r, ch, _ in device_data])
+            if mic_chunks and loopback is not None:
+                app_audio, app_rate, app_channels = loopback
+                mixed, rate = _mix_audio(mic_chunks, [app_audio], app_rate, app_channels, mic_rate)
+                audio_to_write, write_rate, write_ch, write_source = mixed, rate, app_channels, "both"
+            elif mic_chunks:
+                audio_to_write, write_rate, write_ch, write_source = np.concatenate(mic_chunks), mic_rate, 1, "mic"
+            elif loopback is not None:
+                app_audio, app_rate, app_channels = loopback
+                audio_to_write, write_rate, write_ch, write_source = app_audio, app_rate, app_channels, "app"
+            else:
+                self._on_done(None, "both_no_chunks")
+                return
+        except Exception as e:
+            log.error("run_both mix failed: %s", e)
+            self._on_done(None, "both_write_error")
+            return
+        try:
+            sf.write(filepath, audio_to_write, write_rate)
+        except Exception as e:
+            log.error("run_both sf.write failed: %s", e)
+            self._on_done(None, "both_write_error")
+            return
+        try:
+            self._on_done(save_metadata(filepath, write_source, start_time, end_time, write_rate, write_ch), None)
+        except Exception as e:
+            log.error("run_both save_metadata failed (WAV intact at %s): %s", filepath, e)
+            self._on_done(None, "both_metadata_error")
 
     def monitor(self, stop: threading.Event):
         """Open mic + loopback streams for level monitoring only (no saving)."""

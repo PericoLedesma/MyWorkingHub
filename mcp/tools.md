@@ -1,195 +1,82 @@
 # MCP Tool Catalogue — My Working Hub
 
-Design document for the Claude Desktop integration (`mcp/server.py`). Maps app capabilities to tool groups, marks what already exists, and describes every candidate tool with enough detail to implement it.
+Current state of the Claude Desktop integration. Maps app capabilities to tool groups and documents every implemented tool.
 
 ---
 
-## 1. App Features
+## 1. App Capabilities
 
 | Capability | Description |
 |---|---|
 | **Audio recording** | Capture mic-only, system audio (WASAPI loopback), or both simultaneously. Configurable input device. |
 | **Live transcription** | faster-whisper (`small` by default) runs locally, producing incremental segments every 5 s while recording. |
 | **Post-recording transcription** | OpenAI `whisper-1` API call after recording stops; language auto-detected. |
-| **AI summarisation** | DeepSeek `deepseek-chat` via tool-calling (`guardar_resumen`): structured summary with topics, decisions, action items. |
 | **AI bullet notes** | DeepSeek `deepseek-chat` via tool-calling (`guardar_notas`): action items, key points, decisions as markdown bullets. |
-| **Search & chat** | DeepSeek streaming agent over `/ws/chat`; calls `buscar_grabaciones` to query SQLite full-text across all recordings. |
+| **Search & chat** | DeepSeek streaming agent over `/ws/chat`; calls `buscar_grabaciones` to query SQLite full-text across transcripts. |
 | **Focus Time tracking** | Work sessions with start/stop/duration stored in `focus_time.db`; daily aggregates available. |
+| **Mouse jiggler** | Prevents screen lock by nudging the cursor; auto-stops on user input. UI-only, no MCP tools. |
 | **Outlook calendar** | Reads upcoming meetings via COM (`pywin32`); requires desktop Outlook installed. |
 | **OneNote integration** | Creates OneNote pages via COM (`pywin32`); requires desktop OneNote installed. |
+| **Teams (Graph API)** | Reads chats, messages, teams, channels, presence via Microsoft Graph. WAM auth (no browser). |
 | **Tag management** | `project` and `meeting` labels on each recording; editable via PATCH endpoint. |
 
 ---
 
-## 2. Tool Groups + Current Tools
+## 2. Implemented Tools
 
-| Group | Tool | Status | Notes |
+| Group | Tool | Server | Notes |
 |---|---|---|---|
-| **Recordings – Read** | `list_recordings` | ✅ Exists | Filters: date range, project, meeting, limit |
-| | `get_recording` | ✅ Exists | Returns transcript, summary, notes, speaker data |
-| | `search_recordings` | ✅ Exists | Keyword search; optionally includes summaries/notes |
-| **Focus Time** | `get_focus_stats` | ✅ Exists | Daily totals (hours + session count), last 30 days |
-| **Projects – Read** | `list_projects` | ✅ Exists | All projects with recording count, duration, last recording |
-| | `get_project` | ✅ Exists | Project metadata + recording list; case-insensitive name match |
-| **Projects – Write** | `create_project` | ✅ Exists | Create project; raises error on duplicate name |
-| | `update_project` | ✅ Exists | Update any field by project ID; empty string = skip |
-| | `assign_recording_to_project` | ✅ Exists | Link recording to project by name; empty name = unassign |
-| **Recorder Control** | `get_app_state` | Candidate | Is a recording in progress? Any jobs running? |
-| | `start_recording` | Candidate | Trigger recording with source + device; app must be running |
-| | `stop_recording` | Candidate | Stop the active recording; app must be running |
-| | `list_devices` | Candidate | Enumerate available audio input devices |
-| **AI Processing** | `transcribe_recording` | Candidate | Kick off post-recording Whisper transcription |
-| | `generate_notes` | Candidate | Kick off DeepSeek notes generation for a recording |
-| **Calendar** | `get_calendar_events` | Candidate | Fetch upcoming Outlook meetings; app must be running |
-| **Notes & Tagging** | `create_onenote_page` | Candidate | Push a recording's summary/notes to OneNote |
-| | `update_recording_tags` | Candidate | Set project or meeting label on a recording |
-| **Focus Time – Detail** | `get_work_sessions` | Candidate | Individual session rows (not just daily totals) |
+| **Recordings – Read** | `list_recordings` | `recordings_server.py` | Filters: date range, project, meeting, limit |
+| | `get_recording` | `recordings_server.py` | Returns transcript, notes, speaker data |
+| | `search_recordings` | `recordings_server.py` | Keyword search across transcripts; `include_notes` flag |
+| **Recordings – Write** | `transcribe_recording` | `recordings_server.py` | Run Whisper-1 on the WAV file; saves transcript to DB |
+| | `write_notes` | `recordings_server.py` | Persist notes text to DB |
+| | `launch_app` | `recordings_server.py` | Launch Electron app via `launch-widget.bat` (detached) |
+| | `start_recording` | `recordings_server.py` | Start a live recording (`mic`/`app`/`both`); app must be running |
+| | `get_current_recording` | `recordings_server.py` | Is a recording in progress? How long running? |
+| **Projects – Read** | `list_projects` | `projects_server.py` | All projects with recording count, duration, last recording |
+| | `get_project` | `projects_server.py` | Project metadata + recording list; case-insensitive name match |
+| **Projects – Write** | `create_project` | `projects_server.py` | Create project; errors on duplicate name |
+| | `update_project` | `projects_server.py` | Update any field by project ID; empty string = skip |
+| | `assign_recording_to_project` | `projects_server.py` | Link recording to project by name; empty = unassign |
+| **Focus Time** | `get_focus_stats` | `focus_server.py` | Daily totals (hours + session count), last 30 days |
+| | `get_work_sessions` | `focus_server.py` | Individual session rows with start/end times, filterable by date |
+| **Calendar** | `get_calendar_events` | `calendar_server.py` | Upcoming Outlook meetings; `days` param (default 1) |
+| **OneNote** | `get_onenote_hierarchy` | `onenote_server.py` | Notebooks → sections/groups → pages with IDs |
+| | `get_page_content` | `onenote_server.py` | Read all text from a page by ID |
+| | `create_page` | `onenote_server.py` | Create page in first available section |
+| | `create_page_in_section` | `onenote_server.py` | Create page in a specific section (by section ID) |
+| | `create_section` | `onenote_server.py` | Create new section inside a notebook (requires local path) |
+| | `create_recording_page` | `onenote_server.py` | Push a recording's notes to OneNote (title = meeting + date) |
+| | `rename_page` | `onenote_server.py` | Rename a page by ID |
+| | `rename_section` | `onenote_server.py` | Rename a section by ID |
+| | `rename_notebook` | `onenote_server.py` | Rename a notebook display name by ID |
+| | `move_page` | `onenote_server.py` | Move page to a different section |
+| **Teams** | `teams_whoami` | `teams_server.py` | Confirm auth — returns display name + email |
+| | `teams_list_chats` | `teams_server.py` | Recent chats with topic and last-message preview |
+| | `teams_get_messages` | `teams_server.py` | Messages from a specific chat |
+| | `teams_list_teams` | `teams_server.py` | All joined Teams |
+| | `teams_list_channels` | `teams_server.py` | Channels in a Team |
+| | `teams_get_presence` | `teams_server.py` | Current availability / activity status |
+| | `teams_send_message` | `teams_server.py` | Send a message to a chat |
+| **Hub Meta** | `get_readme` | `hub_server.py` | Return full README.md content |
+| | `update_readme` | `hub_server.py` | Overwrite README.md |
+| | `get_dev_context` | `hub_server.py` | Return CLAUDE.md (architecture + dev notes) |
+| | `list_mcp_services` | `hub_server.py` | List all MCP servers and their registered tools |
 
 ---
 
-## 3. Possible New Tools
-
-### `get_app_state`
-
-**What it does:** Returns a snapshot of the app's live state: whether a recording is in progress, which recording IDs are being transcribed/summarised/noted.
-
-**Endpoint / data:** The `/ws/app` WebSocket sends an `init` event on connect with these fields. For MCP (HTTP polling), a new `GET /api/state` endpoint would be the cleanest approach, or the tool can attempt a quick WebSocket connect and read the first message.
-
-**App must be running:** Yes — this reflects runtime state, not DB state.
-
-**Example prompts:**
-- *"Is My Working Hub currently recording something?"*
-- *"Check if there are any transcription jobs still running."*
-
----
-
-### `start_recording`
-
-**What it does:** Starts a new audio recording session. Accepts `source` (`mic` | `app` | `both`) and optional `device_index`.
-
-**Endpoint:** `POST /api/record/start` — body `{ "source": "mic", "device_index": null }`.
-
-**App must be running:** Yes.
-
-**Example prompts:**
-- *"Start recording the mic."*
-- *"Begin capturing system audio."*
-- *"Record both mic and speakers for this meeting."*
-
----
+## 3. Possible Future Tools
 
 ### `stop_recording`
-
-**What it does:** Stops the active recording. The server then kicks off transcription automatically.
-
-**Endpoint:** `POST /api/record/stop`.
-
-**App must be running:** Yes.
-
-**Example prompts:**
-- *"Stop the current recording."*
-- *"I'm done with this meeting, stop recording."*
-
----
+Stop the active recording via MCP (currently only possible through the UI or direct HTTP).
+**Endpoint:** `POST /api/record/stop`
 
 ### `list_devices`
-
-**What it does:** Lists available audio input devices (index + name).
-
-**Endpoint:** `GET /api/devices`.
-
-**App must be running:** Yes.
-
-**Example prompts:**
-- *"What microphones are available?"*
-- *"Which audio devices can I record from?"*
-
----
-
-### `transcribe_recording`
-
-**What it does:** Triggers post-recording Whisper API transcription for a recording that hasn't been transcribed yet (or re-transcribes).
-
-**Endpoint:** `POST /api/recordings/{rid}/transcribe`.
-
-**App must be running:** Yes — the transcription job runs inside the Python process.
-
-**Example prompts:**
-- *"Transcribe recording 42."*
-- *"Run transcription on last week's Monday meeting."*
-
----
-
-
-### `generate_notes`
-
-**What it does:** Triggers DeepSeek bullet-notes generation (action items, key points, decisions) for a recording that has a transcript.
-
-**Endpoint:** `POST /api/recordings/{rid}/generate-notes`.
-
-**App must be running:** Yes.
-
-**Example prompts:**
-- *"Generate notes for recording 42."*
-- *"What were the action items from yesterday's standup?"* *(combined with `get_recording`)*
-
----
-
-### `get_calendar_events`
-
-**What it does:** Returns upcoming Outlook calendar events. Accepts `days` (default 1).
-
-**Endpoint:** `GET /api/calendar/events?days=N`. Internally uses `src/outlook.py` via COM.
-
-**App must be running:** Yes. Also requires desktop Outlook installed and the COM interface available.
-
-**Example prompts:**
-- *"What meetings do I have today?"*
-- *"Show my calendar for the next 3 days."*
-- *"Is there anything scheduled this afternoon?"*
-
----
-
-### `create_onenote_page`
-
-**What it does:** Creates a OneNote page from a recording's summary and notes. The page title would be the meeting name + date; the body would be the structured summary and bullet notes.
-
-**Endpoint:** Currently only `POST /api/onenote/test` exists (hello-world). A real `POST /api/onenote/recording/{rid}` endpoint needs to be added in `server.py` and `src/onenote.py`.
-
-**App must be running:** Yes. Also requires desktop OneNote installed.
-
-**Example prompts:**
-- *"Send recording 42's summary to OneNote."*
-- *"Create a OneNote page for today's product meeting."*
-
----
+List available audio input devices so Claude can help the user pick one before starting a recording.
+**Endpoint:** `GET /api/devices`
 
 ### `update_recording_tags`
-
-**What it does:** Sets the `project` or `meeting` label on a recording.
-
-**Endpoint:** `PATCH /api/recordings/{rid}/tags` — body `{ "field": "project"|"meeting", "value": "..." }`.
-
-**App must be running:** Yes (hits the FastAPI server, though the write goes to SQLite).
-
-**Alternative:** Could be implemented as a direct SQLite write (no app required), matching the pattern of the existing read-only tools.
-
-**Example prompts:**
-- *"Tag recording 42 as project 'Alpha'."*
-- *"Label last Friday's recording as 'Design Review'."*
-- *"Set the meeting name for recording 15 to 'Sprint Planning'."*
-
----
-
-### `get_work_sessions`
-
-**What it does:** Returns individual work session rows (start time, end time, duration) optionally filtered by date. More granular than `get_focus_stats`, which only gives daily totals.
-
-**Endpoint:** `GET /api/work-sessions?date=YYYY-MM-DD`. Reads from `focus_time.db`.
-
-**App must be running:** No — can read directly from `focus_time.db` (same pattern as existing tools).
-
-**Example prompts:**
-- *"Show me all focus sessions from last Monday."*
-- *"How long was each work block yesterday?"*
-- *"Did I have any focus sessions this morning?"*
+Set the `project` or `meeting` label on a recording directly from Claude.
+**Endpoint:** `PATCH /api/recordings/{rid}/tags`
+**Alternative:** Direct SQLite write (no app required), consistent with other read tools.

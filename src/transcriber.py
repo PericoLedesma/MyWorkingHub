@@ -45,26 +45,15 @@ class Transcriber:
             resp = self._client.audio.transcriptions.create(
                 model="whisper-1", file=f, response_format="verbose_json"
             )
-        BUCKET_SEC = 120
         parts: list[str] = []
-        current_bucket = -1
-        bucket_texts: list[str] = []
-        bucket_label = ""
         for seg in resp.segments:
+            text = seg.text.strip()
+            if not text:
+                continue
             t = int(seg.start) + int(offset_sec)
-            bucket = t // BUCKET_SEC
-            if bucket != current_bucket:
-                if bucket_texts:
-                    parts.append(f"{bucket_label} {' '.join(bucket_texts)}")
-                current_bucket = bucket
-                h, rem = divmod(t, 3600)
-                m, s = divmod(rem, 60)
-                bucket_label = f"[{h:02d}:{m:02d}:{s:02d}]"
-                bucket_texts = [seg.text.strip()]
-            else:
-                bucket_texts.append(seg.text.strip())
-        if bucket_texts:
-            parts.append(f"{bucket_label} {' '.join(bucket_texts)}")
+            h, rem = divmod(t, 3600)
+            m, s = divmod(rem, 60)
+            parts.append(f"[{h:02d}:{m:02d}:{s:02d}] {text}")
         return parts, resp.language
 
     def _transcribe_audio(self, filepath: str) -> tuple[str, str]:

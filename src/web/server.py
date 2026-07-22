@@ -1,5 +1,6 @@
 """FastAPI web server for My Working Hub."""
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -56,8 +57,22 @@ async def _on_recording_done(meta: dict | None, reason: str | None) -> None:
     """Runs on the event loop after the recording thread finishes."""
     state.recording = False
     state.recording_start = None
+    state.recording_thread = None
 
-    # Restart level monitor
+    if meta and state.live_segments:
+        segs = state.live_segments[:]
+        live_tx = "\n".join(
+            f"{ts} {'[' + sp + '] ' if sp else ''}{text}".strip()
+            for ts, text, sp in segs
+        )
+        try:
+            db.save_transcript_speaker(meta["id"], live_tx)
+        except Exception:
+            log.exception("Failed to save live transcript for recording %s", meta["id"])
+    state.live_segments = []
+
+    # Always restart monitor and broadcast even if DB work above failed —
+    # otherwise the UI stays stuck showing "Recording…" with no way to recover.
     _start_monitor()
 
     if meta:
@@ -103,13 +118,21 @@ def _start_monitor() -> None:
         set_app_level=state.set_app_level,
         on_done=lambda *_: None,
     )
-    threading.Thread(target=r.monitor, args=(ev,), daemon=True).start()
+    t = threading.Thread(target=r.monitor, args=(ev,), daemon=True)
+    state.monitor_thread = t
+    t.start()
 
 
 def _stop_monitor() -> None:
     if state.monitor_stop:
         state.monitor_stop.set()
         state.monitor_stop = None
+    if state.monitor_thread:
+        # Must join before returning: monitor holds WASAPI loopback handles, and recording
+        # opening the same device while the monitor still owns it produces a dead stream
+        # (audio bar goes silent). See Recording Integrity Rule 6 in CLAUDE.md.
+        state.monitor_thread.join(timeout=2)
+        state.monitor_thread = None
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
@@ -136,6 +159,7 @@ async def lifespan(app: FastAPI):
     sess = focus_db.start_work_session()
     state.focus_session_id = sess["id"]
     state.focus_session_start = sess["start_time"]
+    focus_db.record_app_start()
 
     yield
 
@@ -147,6 +171,9 @@ async def lifespan(app: FastAPI):
     _stop_monitor()
     if state.stop_event:
         state.stop_event.set()
+    if state.recording_thread and state.recording_thread.is_alive():
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: state.recording_thread.join(timeout=30))
     if state.focus_session_id is not None:
         focus_db.end_work_session(state.focus_session_id)
         state.focus_session_id = None
@@ -201,6 +228,7 @@ def get_transcript(rid: int):
         "language": db.get_language(rid),
         "speaker": db.get_transcript_speaker(rid),
         "notes": db.get_notes(rid),
+        "user_notes": db.get_user_notes(rid),
     }
 
 
@@ -211,6 +239,12 @@ class NotesUpdate(BaseModel):
 @app.patch("/api/recordings/{rid}/notes")
 def save_notes_endpoint(rid: int, body: NotesUpdate):
     db.save_notes(rid, body.text)
+    return {"ok": True}
+
+
+@app.patch("/api/recordings/{rid}/user-notes")
+def save_user_notes_endpoint(rid: int, body: NotesUpdate):
+    db.save_user_notes(rid, body.text)
     return {"ok": True}
 
 
@@ -253,6 +287,52 @@ def get_devices():
         return []
 
 
+@app.get("/api/debug/audio-devices")
+def debug_audio_devices():
+    """Return all PyAudio devices + loopback devices for diagnosing capture issues."""
+    import pyaudiowpatch as pyaudio
+    pa = pyaudio.PyAudio()
+    try:
+        all_devices = []
+        for i in range(pa.get_device_count()):
+            d = pa.get_device_info_by_index(i)
+            all_devices.append({
+                "index": i,
+                "name": d["name"],
+                "maxInputChannels": d["maxInputChannels"],
+                "maxOutputChannels": d["maxOutputChannels"],
+                "defaultSampleRate": d["defaultSampleRate"],
+                "hostApi": d["hostApi"],
+            })
+        loopbacks = []
+        try:
+            for d in pa.get_loopback_device_info_generator():
+                loopbacks.append({
+                    "index": d["index"],
+                    "name": d["name"],
+                    "channels": d["maxInputChannels"],
+                    "sampleRate": d["defaultSampleRate"],
+                })
+        except Exception as e:
+            loopbacks = [{"error": str(e)}]
+        try:
+            wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+            default_out_idx = wasapi["defaultOutputDevice"]
+            default_out = pa.get_device_info_by_index(default_out_idx)
+            default_comm_idx = wasapi.get("defaultInputDevice")
+        except Exception:
+            default_out = None
+            default_comm_idx = None
+        return {
+            "allDevices": all_devices,
+            "loopbackDevices": loopbacks,
+            "defaultOutputDevice": default_out,
+            "defaultCommunicationsDeviceIndex": default_comm_idx,
+        }
+    finally:
+        pa.terminate()
+
+
 # ── REST: record controls ────────────────────────────────────────────────────
 
 class RecordStart(BaseModel):
@@ -286,11 +366,16 @@ async def record_start(body: RecordStart):
     fn = {"mic": rec.run_mic, "app": rec.run_loopback, "both": rec.run_both}.get(
         body.source, rec.run_mic
     )
-    threading.Thread(target=fn, daemon=True).start()
+    t = threading.Thread(target=fn, daemon=True)
+    state.recording_thread = t
+    t.start()
 
-    def _on_live_segment(timestamp: str, text: str) -> None:
+    state.live_segments = []
+
+    def _on_live_segment(timestamp: str, text: str, speaker: str = "") -> None:
+        state.live_segments.append((timestamp, text, speaker))
         asyncio.run_coroutine_threadsafe(
-            state.broadcast({"type": "live_transcript", "timestamp": timestamp, "text": text}),
+            state.broadcast({"type": "live_transcript", "timestamp": timestamp, "text": text, "speaker": speaker}),
             state.loop,
         )
 
@@ -310,6 +395,21 @@ async def record_stop():
         return {"ok": False, "reason": "not_recording"}
     if state.stop_event:
         state.stop_event.set()
+    return {"ok": True}
+
+
+@app.post("/api/shutdown")
+async def shutdown():
+    """Stop any active recording, wait for it to be written to disk, then return.
+
+    Electron calls this before hard-killing the Python process so the WAV file
+    and DB row are guaranteed to be flushed before the process exits.
+    """
+    if state.stop_event:
+        state.stop_event.set()
+    if state.recording_thread and state.recording_thread.is_alive():
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: state.recording_thread.join(timeout=30))
     return {"ok": True}
 
 
@@ -446,6 +546,8 @@ def create_work_session():
 @app.patch("/api/work-sessions/{session_id}/end")
 def end_work_session(session_id: int):
     focus_db.end_work_session(session_id)
+    if state.focus_session_id == session_id:
+        state.focus_session_id = None
     return {"ok": True}
 
 
@@ -458,6 +560,12 @@ def get_work_sessions(date: str | None = None):
 def delete_work_sessions(date: str):
     count = focus_db.delete_sessions_by_date(date)
     return {"deleted": count}
+
+
+@app.get("/api/app-events")
+def get_app_events(date: str | None = None):
+    today = date or datetime.date.today().isoformat()
+    return focus_db.get_app_events(today)
 
 
 # ── REST: jiggler ────────────────────────────────────────────────────────────
@@ -482,71 +590,6 @@ def jiggler_stop():
 @app.get("/api/jiggler/status")
 def jiggler_status():
     return {"running": _jiggler.running}
-
-
-# ── REST: projects ───────────────────────────────────────────────────────────
-
-class ProjectCreate(BaseModel):
-    name: str
-    description: str = ""
-    status: str = "Active"
-    client: str = ""
-    objective: str = ""
-    phases: list[str] = []
-    streams: list[str] = []
-    color: str = ""
-
-
-class ProjectUpdate(BaseModel):
-    name: str | None = None
-    description: str | None = None
-    status: str | None = None
-    client: str | None = None
-    objective: str | None = None
-    phases: list[str] | None = None
-    streams: list[str] | None = None
-    color: str | None = None
-
-
-@app.get("/api/projects")
-def get_projects():
-    return db.list_projects()
-
-
-@app.post("/api/projects")
-def create_project_endpoint(body: ProjectCreate):
-    if not body.name.strip():
-        raise HTTPException(400, "name is required")
-    if body.status not in ("Active", "On Hold", "Done"):
-        raise HTTPException(400, "status must be Active, On Hold, or Done")
-    try:
-        return db.create_project(
-            name=body.name.strip(),
-            description=body.description,
-            status=body.status,
-            client=body.client,
-            objective=body.objective,
-            phases=body.phases,
-            streams=body.streams,
-            color=body.color,
-        )
-    except ValueError as e:
-        raise HTTPException(409, str(e))
-
-
-@app.patch("/api/projects/{pid}")
-def update_project_endpoint(pid: int, body: ProjectUpdate):
-    updates = {k: v for k, v in body.model_dump().items() if v is not None}
-    if "name" in updates and not updates["name"].strip():
-        raise HTTPException(400, "name cannot be empty")
-    db.update_project(pid, **updates)
-    return {"ok": True}
-
-
-@app.delete("/api/projects/{pid}")
-def delete_project_endpoint(pid: int):
-    db.delete_project(pid)
-    return {"ok": True}
 
 
 # ── WebSocket: /ws/app ────────────────────────────────────────────────────────

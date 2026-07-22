@@ -17,7 +17,7 @@ def _txt_path(wav_path: str) -> str:
     return os.path.splitext(wav_path)[0] + ".txt"
 
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 
 
 def _init():
@@ -132,6 +132,14 @@ def _init():
             conn.execute("UPDATE recordings SET summary = NULL")
             conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
 
+        if db_version < 10:
+            log.info("Migrating schema to v10 (user_notes column)")
+            try:
+                conn.execute("ALTER TABLE recordings ADD COLUMN user_notes TEXT")
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
+
         # Migrate any existing .txt sidecar files into the DB
         rows = conn.execute(
             "SELECT filepath FROM recordings WHERE transcript IS NULL"
@@ -233,6 +241,15 @@ def get_transcript_speaker(recording_id: int) -> str | None:
     return row[0] if row else None
 
 
+def save_transcript_speaker(recording_id: int, text: str) -> None:
+    log.info("save_transcript_speaker  chars=%d  id=%d", len(text), recording_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET transcript_speaker = ? WHERE id = ?",
+            (text, recording_id),
+        )
+
+
 def save_notes(recording_id: int, text: str) -> None:
     """Persist AI-generated or user-edited notes for a recording."""
     log.info("save_notes  chars=%d  id=%d", len(text), recording_id)
@@ -252,6 +269,25 @@ def get_notes(recording_id: int) -> str | None:
         ).fetchone()
     return row[0] if row else None
 
+
+def save_user_notes(recording_id: int, text: str) -> None:
+    """Persist user-written personal notes for a recording."""
+    log.info("save_user_notes  chars=%d  id=%d", len(text), recording_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET user_notes = ? WHERE id = ?",
+            (text, recording_id),
+        )
+
+
+def get_user_notes(recording_id: int) -> str | None:
+    """Return user-written personal notes for a recording, or None if not set."""
+    log.debug("get_user_notes  id=%d", recording_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT user_notes FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
+    return row[0] if row else None
 
 
 def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
@@ -313,7 +349,8 @@ def load_metadata(folder: str) -> list[dict]:
             "SELECT id, filepath, source, start_time, end_time, duration, sample_rate, channels, file_size, "
             "(transcript IS NOT NULL) as has_transcript, project, meeting, "
             "language, "
-            "(transcript_speaker IS NOT NULL) as has_speaker "
+            "(transcript_speaker IS NOT NULL) as has_speaker, "
+            "(notes IS NOT NULL) as has_notes "
             "FROM recordings ORDER BY start_time DESC"
         ).fetchall()
 
@@ -325,12 +362,13 @@ def load_metadata(folder: str) -> list[dict]:
                 folder_wavs[f] = os.path.join(root, f)
 
     log.debug("load_metadata  folder=%s  rows_in_db=%d", folder, len(rows))
-    path_updates: list[tuple[str, int]] = []  # (new_fp, row_id)
+    path_updates: list[tuple[str, int]] = []        # (new_fp, row_id)
+    duration_updates: list[tuple[float, int]] = []  # (actual_dur, row_id)
     known: set[str] = set()
     recs = []
     missing_count = 0
     for row in rows:
-        row_id, fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, language, has_speaker = row
+        row_id, fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, language, has_speaker, has_notes = row
         file_missing = False
         if not os.path.exists(fp):
             basename = os.path.basename(fp)
@@ -342,6 +380,24 @@ def load_metadata(folder: str) -> list[dict]:
             else:
                 file_missing = True
                 missing_count += 1
+
+        if not file_missing:
+            # Verify stored duration matches the actual WAV file.
+            # The "both" source bug used to truncate the WAV to loopback length while
+            # the DB stored wall-clock time — this corrects those stale rows.
+            try:
+                import soundfile as sf
+                actual_dur = sf.info(fp).duration
+                if abs(actual_dur - dur) > 1.0:
+                    log.warning(
+                        "duration mismatch id=%d stored=%.1fs actual=%.1fs — correcting",
+                        row_id, dur, actual_dur,
+                    )
+                    duration_updates.append((actual_dur, row_id))
+                    dur = actual_dur
+            except Exception:
+                pass
+
         recs.append({
             "id": row_id,
             "filepath": fp,
@@ -354,6 +410,7 @@ def load_metadata(folder: str) -> list[dict]:
             "file_size": fsize,
             "has_transcript": bool(has_transcript),
             "has_speaker": bool(has_speaker),
+            "has_notes": bool(has_notes),
             "project": project or "",
             "meeting": meeting or "",
             "language": language or "",
@@ -368,6 +425,13 @@ def load_metadata(folder: str) -> list[dict]:
         with sqlite3.connect(DB_PATH) as conn:
             conn.executemany(
                 "UPDATE recordings SET filepath = ? WHERE id = ?", path_updates
+            )
+
+    if duration_updates:
+        log.info("Corrected duration for %d recording(s)", len(duration_updates))
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.executemany(
+                "UPDATE recordings SET duration = ? WHERE id = ?", duration_updates
             )
 
     if missing_count:

@@ -1,8 +1,32 @@
 # My Working Hub — Dev Context for Claude Code
 
+## CRITICAL: Recording Integrity Rules
+
+**Recordings are the single source of truth. Everything else — transcripts, summaries, notes — is derived from them. A lost recording is permanently lost data. No refactor, cleanup, or "simplification" of the recording path is worth the risk. When in doubt, leave it alone.**
+
+1. **Never truncate mic audio.** The mic stream is continuous and authoritative. In `_mix_audio`, loopback is zero-padded to match mic length — never the other way around. WASAPI loopback only delivers chunks when audio is playing; silence produces no callbacks, so loopback duration will often be far shorter than wall-clock time. That is expected and must never cause mic data loss.
+
+2. **`run_both()` always saves something.** If the loopback device is missing, fall back to `run_mic()`. If `mic_chunks` is non-empty at the end, always write the file. Never return `_on_done(None, ...)` when mic audio was successfully captured.
+
+3. **`sf.write()` must be inside try/except.** A disk error must call `_on_done(None, "write_error")` — not leave `state.recording = True` permanently, which bricks the app until restart.
+
+4. **Graceful shutdown must flush the recording.** Electron calls `POST /api/shutdown` before hard-killing Python. That endpoint stops the recording and awaits `state.recording_thread.join(timeout=30)` before returning. The lifespan teardown does the same on SIGTERM. The WAV file and DB row must be on disk before the process exits.
+
+5. **`save_metadata` uses `INSERT OR IGNORE`.** Re-importing the same filepath is a no-op; the existing DB row is returned. Schema migrations are additive (`ALTER TABLE ADD COLUMN` only). Current schema version: **10**.
+
+6. **`_stop_monitor()` must join the monitor thread before returning.** The monitor holds open WASAPI loopback stream handles. If recording starts before those handles are released, Windows gives the new stream a dead endpoint — the app audio bar goes silent during recording even though the monitor showed audio fine. `_stop_monitor()` sets the stop event AND calls `state.monitor_thread.join(timeout=2)`. Never remove the join or make `_stop_monitor` fire-and-forget.
+
+7. **Stream open and stream close must be in separate try/except blocks in `run_mic`.** If `stop_stream()`/`close()` raises inside the same `try` as `pa.open()`, the `except` fires `_on_done(None, ...)` and discards all captured audio. The open is guarded to abort early; the close is best-effort. Captured chunks are always preserved.
+
+8. **`sf.write` and `save_metadata` must be in separate try/except blocks.** If they share one block and `save_metadata` raises after the WAV is already written, the `except` reports failure and the WAV is orphaned on disk with no DB row — invisible in the UI, never cleaned up. Always write the file first, return on failure, then call `save_metadata` in its own block.
+
+9. **`_on_recording_done` must always call `_start_monitor()` and broadcast `recording_stopped`.** These lines must run even if the DB work above them raises. Wrap the DB call in its own try/except so a metadata failure cannot leave the UI permanently stuck on "Recording…".
+
+---
+
 ## What This Is
 
-A Windows desktop productivity widget built with Electron + Python/FastAPI. Records meetings, transcribes with AI, generates structured summaries and bullet notes, tracks focus time, and integrates with Outlook/OneNote. An MCP server exposes all functionality to Claude Desktop, organized by service.
+A Windows desktop productivity widget built with Electron + Python/FastAPI. Records meetings, transcribes with AI, generates bullet notes, tracks focus time, prevents screen lock (mouse jiggler), and integrates with Outlook/OneNote. An MCP layer exposes all functionality to Claude Desktop, organized by service.
 
 Electron is purely the shell — it spawns Python as a child process and renders the web UI in a frameless always-on-top window with an animated slide-in panel on the right edge of the screen.
 
@@ -22,9 +46,11 @@ Kills any process on port 8765, ensures `node_modules` is installed, then runs `
 # open http://127.0.0.1:8765
 ```
 
-**MCP server** (standalone, for Claude Desktop):
+**MCP servers** (standalone, for Claude Desktop — each service is a separate process):
 ```powershell
-.venv\Scripts\python.exe mcp/server.py
+.venv\Scripts\python.exe mcp/recordings_server.py
+.venv\Scripts\python.exe mcp/hub_server.py
+# etc. — see MCP Registration section
 ```
 
 ---
@@ -34,7 +60,7 @@ Kills any process on port 8765, ensures `node_modules` is installed, then runs `
 | Variable | Purpose |
 |---|---|
 | `OPENAI_API_KEY` | Post-recording transcription via `whisper-1` |
-| `DEEPSEEK_API_KEY` | Summaries, notes, and chat via DeepSeek |
+| `DEEPSEEK_API_KEY` | Notes and chat via DeepSeek |
 | `SMART_RECORDER_DATA_DIR` | Data directory (default: `%USERPROFILE%\OneDrive - Accenture\Desktop\MyDB`) |
 | `LIVE_WHISPER_MODEL` | faster-whisper model: `tiny`, `base`, `small` (default), `medium` |
 
@@ -43,10 +69,10 @@ Kills any process on port 8765, ensures `node_modules` is installed, then runs `
 ## Data Storage
 
 Two SQLite databases in `SMART_RECORDER_DATA_DIR`:
-- `smart_recorder.db` — recordings, transcripts, summaries, notes, tags, projects
+- `smart_recorder.db` — recordings, transcripts, notes, tags, projects
 - `focus_time.db` — Focus Time work sessions
 
-WAV files live in a `recordings/` subfolder alongside the databases. Schema migrations are additive (`ALTER TABLE ADD COLUMN`, never destructive). Current schema version: 7.
+WAV files live in a `recordings/` subfolder alongside the databases. Schema migrations are additive (`ALTER TABLE ADD COLUMN`, never destructive). Current schema version: **10**.
 
 ---
 
@@ -75,8 +101,8 @@ main.py → uvicorn → FastAPI on :8765
 | `init` | current recording/job state on connect |
 | `level` | mic + app audio VU levels |
 | `recording_started` / `recording_stopped` | source, start_time / meta |
-| `job_started` | job: `transcribe` \| `summarize` \| `notes`, id |
-| `transcribed` / `summarized` / `notes_generated` | id, ok |
+| `job_started` | job: `transcribe` \| `notes`, id |
+| `transcribed` / `notes_generated` | id, ok |
 | `live_transcript` | timestamp, text (incremental segment) |
 | `imported` / `import_error` | meta / reason |
 
@@ -97,7 +123,7 @@ main.py → uvicorn → FastAPI on :8765
 
 ## Service: Recording
 
-Handles audio capture, live transcription during recording, and post-recording AI processing (transcription → summarization → notes).
+Handles audio capture, live transcription during recording, and post-recording AI processing (transcription → notes). Also exposes debug and status endpoints.
 
 **Source files:**
 ```
@@ -106,7 +132,6 @@ src/live_transcriber.py  real-time faster-whisper segments every 5s
 src/transcriber.py       post-recording OpenAI whisper-1 transcription
 src/agents/
   base.py                BaseAgent — tool-calling loop + streaming (shared)
-  agent_summarization.py SummarizationAgent — DeepSeek, tool: guardar_resumen
   agent_notes.py         NotesAgent — DeepSeek, tool: guardar_notas
 ```
 
@@ -116,7 +141,6 @@ src/agents/
 |---|---|---|
 | Live transcription | faster-whisper `small` (local) | Every 5s during recording |
 | Post-recording transcription | OpenAI `whisper-1` | After recording stops |
-| Summarization | DeepSeek `deepseek-chat` | Tool-call: `guardar_resumen` |
 | Notes | DeepSeek `deepseek-chat` | Tool-call: `guardar_notas` |
 
 **REST API endpoints:**
@@ -127,14 +151,16 @@ src/agents/
 | `POST` | `/api/recordings/scan` | Rescan folder and return list |
 | `PATCH` | `/api/recordings/{rid}/tags` | Set `project` or `meeting` label |
 | `DELETE` | `/api/recordings/{rid}` | Delete recording + WAV file |
-| `GET` | `/api/recordings/{rid}/transcript` | Full transcript, summary, notes, speaker |
+| `GET` | `/api/recordings/{rid}/transcript` | Full transcript, notes, speaker |
 | `PATCH` | `/api/recordings/{rid}/notes` | Overwrite notes text |
 | `POST` | `/api/recordings/{rid}/transcribe` | Trigger Whisper transcription |
-| `POST` | `/api/recordings/{rid}/summarize` | Trigger DeepSeek summarization |
 | `POST` | `/api/recordings/{rid}/generate-notes` | Trigger DeepSeek notes |
 | `GET` | `/api/devices` | List available audio input devices |
+| `GET` | `/api/debug/audio-devices` | All PyAudio + WASAPI loopback devices (for capture diagnostics) |
 | `POST` | `/api/record/start` | Start recording `{source, device_index}` |
 | `POST` | `/api/record/stop` | Stop active recording |
+| `GET` | `/api/recording/status` | Current recording state `{recording, recording_start}` |
+| `POST` | `/api/shutdown` | Graceful shutdown — flushes recording before process exits |
 | `POST` | `/api/import` | Import audio file (WAV or ffmpeg-converted) |
 | `GET` | `/audio/{rid}` | Serve WAV file |
 | `GET` | `/api/open_folder/{rid}` | Open file location in Explorer |
@@ -199,6 +225,7 @@ src/focus_db.py   focus_time.db — start_work_session, end_work_session, list_w
 
 | Method | Path | Description |
 |---|---|---|
+| `GET` | `/api/work-sessions/current` | Currently active session `{id, start_time}` or null |
 | `POST` | `/api/work-sessions` | Start a new session |
 | `PATCH` | `/api/work-sessions/{id}/end` | End session |
 | `GET` | `/api/work-sessions?date=YYYY-MM-DD` | List sessions, optional date filter |
@@ -210,6 +237,27 @@ src/focus_db.py   focus_time.db — start_work_session, end_work_session, list_w
 |---|---|---|
 | `get_focus_stats` | Exists | Daily totals (hours + session count), last 30 days |
 | `get_work_sessions` | Exists | Individual session rows with start/end times, filterable by date |
+
+---
+
+## Service: Jiggler
+
+Prevents the screen from locking by nudging the mouse cursor at a fixed interval. Stops automatically if the user moves the mouse or presses a key (detected via `pynput`).
+
+**Source files:**
+```
+src/jiggler.py   MouseJiggler class — pyautogui nudge loop + pynput keyboard listener
+```
+
+**REST API endpoints:**
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/jiggler/start` | Start jiggling (3-second interval); auto-stops on user input |
+| `POST` | `/api/jiggler/stop` | Stop jiggling |
+| `GET` | `/api/jiggler/status` | `{running: bool}` |
+
+**WebSocket events:** `jiggler_stopped` `{reason: "user_input"}` — fired when the jiggler auto-stops because the user moved the mouse or pressed a key.
 
 ---
 
@@ -331,13 +379,13 @@ src/agents/agent_orchestrator.py  ChatAgent — system prompt + buscar_grabacion
 
 **WebSocket:** `/ws/chat` — receives `{text}`, streams back `{type: "token", text}` and `{type: "done"}`.
 
-The chat agent has one tool: `buscar_grabaciones` — full-text search over `transcript` and `summary` columns in SQLite. Chat history is kept in `state.chat_history` (in-process, resets on restart).
+The chat agent has one tool: `buscar_grabaciones` — full-text search over the `transcript` column in SQLite, returns up to 20 matching recordings with context excerpts. Chat history is kept in `state.chat_history` (in-process, resets on restart).
 
 ---
 
 ## MCP Registration (Claude Desktop)
 
-Each service is a separate MCP server. Add all seven to `claude_desktop_config.json`.
+Each service is a separate MCP server. Add all seven to `claude_desktop_config.json`. Note: Jiggler has no MCP server (UI-only feature).
 
 **Config file location:**
 ```
@@ -379,7 +427,7 @@ Each service is a separate MCP server. Add all seven to `claude_desktop_config.j
 }
 ```
 
-All tools read SQLite or call COM/PowerShell directly — none require the app to be running. `hub-teams` requires one-time OAuth consent (native Windows account picker) and is pending authorization.
+All tools read SQLite or call COM/PowerShell directly — none require the app to be running. `hub-teams` requires one-time OAuth consent (native Windows WAM account picker); subsequent calls are fully silent.
 
 ---
 

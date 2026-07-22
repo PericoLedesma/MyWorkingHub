@@ -21,6 +21,13 @@ def _init():
                 duration_seconds REAL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_events (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                date      TEXT NOT NULL
+            )
+        """)
 
 
 _init()
@@ -57,7 +64,8 @@ def end_work_session(session_id: int) -> None:
     now = datetime.datetime.now()
     with sqlite3.connect(FOCUS_DB_PATH) as conn:
         row = conn.execute(
-            "SELECT start_time FROM work_sessions WHERE id = ?", (session_id,)
+            "SELECT start_time FROM work_sessions WHERE id = ? AND end_time IS NULL",
+            (session_id,),
         ).fetchone()
         if not row:
             return
@@ -107,3 +115,22 @@ def delete_sessions_by_date(date: str) -> int:
         count = cur.rowcount
     log.info("delete_sessions_by_date  date=%s  deleted=%d", date, count)
     return count
+
+
+def record_app_start() -> None:
+    now = datetime.datetime.now()
+    with sqlite3.connect(FOCUS_DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO app_events (timestamp, date) VALUES (?, ?)",
+            (now.isoformat(), now.date().isoformat()),
+        )
+    log.info("record_app_start  timestamp=%s", now.isoformat())
+
+
+def get_app_events(date: str) -> list[dict]:
+    with sqlite3.connect(FOCUS_DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT id, timestamp, date FROM app_events WHERE date = ? ORDER BY timestamp ASC",
+            (date,),
+        ).fetchall()
+    return [{"id": r[0], "timestamp": r[1], "date": r[2]} for r in rows]

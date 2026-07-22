@@ -70,10 +70,9 @@ Control panel for capturing audio.
 4. Hit **Record** — VU meters and a live transcript appear in real-time
 5. Hit **Stop** — the WAV file is saved, then the pipeline runs automatically:
    - Whisper API transcription
-   - DeepSeek summarization (topics, decisions, action items)
    - DeepSeek bullet notes (action items, key points, decisions)
 
-You can also **import** an existing audio file (WAV, or any format if ffmpeg is installed) to run it through the same transcription and summarization pipeline.
+You can also **import** an existing audio file (WAV, or any format if ffmpeg is installed) to run it through the same transcription pipeline.
 
 **AI models used:**
 
@@ -81,14 +80,13 @@ You can also **import** an existing audio file (WAV, or any format if ffmpeg is 
 |---|---|
 | Live transcription (during recording) | faster-whisper `small` — runs locally, no API cost |
 | Post-recording transcription | OpenAI `whisper-1` |
-| Summarization | DeepSeek `deepseek-chat` |
 | Notes | DeepSeek `deepseek-chat` |
 
 ---
 
 ### History
 
-Browse all past recordings as cards. Each card shows the date, duration, project, meeting name, and processing status. Click a card to expand it and view the full transcript, structured summary, and bullet notes. Cards can be filtered by project, date range, or keyword.
+Browse all past recordings as cards. Each card shows the date, duration, project, meeting name, and processing status. Click a card to expand it and view the full transcript and bullet notes. Cards can be filtered by project, date range, or keyword.
 
 A timeline bar at the top shows all recordings grouped by month as colored dots — click any dot to jump to that recording.
 
@@ -108,11 +106,11 @@ Recordings can be linked to a project from the History card or from the Recordin
 
 ### Chat
 
-Ask questions across all your past recordings. The AI searches transcripts and summaries in SQLite and answers in a streaming conversational style.
+Ask questions across all your past recordings. The AI searches transcripts and notes in SQLite and answers in a streaming conversational style.
 
 Examples:
 - *"What did we decide about the API redesign last week?"*
-- *"Summarize all action items from the Alpha project this month."*
+- *"What were the action items from the Alpha project this month?"*
 - *"Who was mentioned in yesterday's standup?"*
 
 Chat history persists within a session and resets when the app restarts.

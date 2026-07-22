@@ -23,7 +23,6 @@ const S = {
   nextProject:     '',       // project to apply when recording stops
   nextMeeting:     '',       // meeting to apply when recording stops
   calEvents:       [],       // today's calendar events (cached)
-  projects:        [],       // project entities from /api/projects
 };
 
 // ── Page navigation ───────────────────────────────────────────────────────────
@@ -35,10 +34,13 @@ function showPage(name) {
     b.classList.toggle('active', b.dataset.page === name);
   });
   if (name === 'history') renderHistoryBar();
-  if (name === 'focustime') ftLoadSessions();
+  if (name === 'focustime') { ftShowTab('today'); ftLoadSessions(); }
+  else {
+    document.getElementById('nav-ft-today-btn')?.classList.remove('active');
+    document.getElementById('nav-ft-stats-btn')?.classList.remove('active');
+  }
   if (name === 'calendar') calInit();
   if (name === 'home') homeInit();
-  if (name === 'projects') projLoadAndRender();
   if (name === 'tools') toolsInit();
 }
 
@@ -221,10 +223,12 @@ function onWsMessage(msg) {
       startTimer();
       clearLiveTranscript();
       document.getElementById('live-transcript-panel').style.display = '';
+      { const badge = document.getElementById('rec-linked-meeting');
+        if (badge) { badge.textContent = S.nextMeeting ? `📅 ${S.nextMeeting}` : ''; badge.style.display = S.nextMeeting ? '' : 'none'; } }
       break;
 
     case 'live_transcript':
-      appendLiveTranscript(msg.timestamp, msg.text);
+      appendLiveTranscript(msg.timestamp, msg.text, msg.speaker || '');
       break;
 
     case 'recording_stopped':
@@ -232,6 +236,7 @@ function onWsMessage(msg) {
       S.recordingStart = null;
       updateRecordButton();
       stopTimer();
+      { const badge = document.getElementById('rec-linked-meeting'); if (badge) badge.style.display = 'none'; }
       // Stay on Recordings page — live transcript remains visible for any in-flight chunks.
       // The recording is saved in the background; user can navigate to History when ready.
       if (msg.meta) {
@@ -375,6 +380,12 @@ async function toggleRecord() {
     const deviceIndex = sel.value !== '' ? parseInt(sel.value) : null;
     S.nextProject = document.getElementById('new-project').value.trim();
     S.nextMeeting = document.getElementById('new-meeting').value.trim();
+    // Auto-link to a currently-active Outlook meeting if the user left the field blank
+    if (!S.nextMeeting && S.calEvents.length) {
+      const now = new Date();
+      const active = S.calEvents.find(e => new Date(e.start) <= now && now < new Date(e.end));
+      if (active) S.nextMeeting = active.subject;
+    }
     document.getElementById('new-project').value = '';
     document.getElementById('new-meeting').value = '';
     await api('POST', '/api/record/start', {
@@ -406,10 +417,16 @@ function clearLiveTranscript() {
   document.getElementById('live-tx-body').innerHTML = '';
 }
 
-function appendLiveTranscript(timestamp, text) {
+function appendLiveTranscript(timestamp, text, speaker) {
   const body = document.getElementById('live-tx-body');
   const line = document.createElement('div');
   line.className = 'live-tx-line';
+  if (speaker) {
+    const sp = document.createElement('span');
+    sp.className = 'live-tx-speaker live-tx-speaker--' + speaker.toLowerCase();
+    sp.textContent = speaker;
+    line.appendChild(sp);
+  }
   const ts = document.createElement('span');
   ts.className = 'live-tx-ts';
   ts.textContent = timestamp;
@@ -832,8 +849,19 @@ function buildDetailHTML(id, data) {
       ${data.speaker   ? `<div class="detail-transcript-text subtab-panel" data-subtab="speaker"    style="display:none">${esc(data.speaker)}</div>`   : ''}`
     : `<p class="detail-empty">No transcript yet — click Transcribe to generate one.</p>`;
 
+  const userNotesSection = `
+    <div class="notes-section user-notes-section">
+      <div class="notes-header">
+        <span class="notes-label user-notes-label">My Notes</span>
+      </div>
+      <textarea class="notes-textarea user-notes-textarea"
+                onblur="saveUserNotes(${id}, this.value)"
+                placeholder="Add your personal notes…">${esc(data.user_notes || '')}</textarea>
+    </div>`;
+
   return `
     ${notesSection}
+    ${userNotesSection}
     <div class="detail-tabs">
       <button class="detail-tab${hasTranscript ? '' : ' tab-empty'}" data-tab="transcript"
               onclick="toggleTranscriptPanel(${id})">Transcript</button>
@@ -877,6 +905,10 @@ async function refreshExpandedDetail(id) {
 
 async function saveNotes(id, text) {
   await api('PATCH', `/api/recordings/${id}/notes`, { text });
+}
+
+async function saveUserNotes(id, text) {
+  await api('PATCH', `/api/recordings/${id}/user-notes`, { text });
 }
 
 async function generateNotes(id) {
@@ -1081,16 +1113,22 @@ function escHtml(s) {
 // ── Focus Time ────────────────────────────────────────────────────────────────
 
 const FT = {
-  active: true,
+  active: false,
   sessionId: null,
   sessionStartMs: null,
   tickInterval: null,
   tickCount: 0,
   sessions: [],
+  lastActivityMs: Date.now(),
+  appEvents: [],
+  idleThresholdMs: 5 * 60 * 1000,
 };
 
 function initFocusTime() {
-  window.electronAPI?.setFocusState(true);
+  const bump = () => { FT.lastActivityMs = Date.now(); };
+  document.addEventListener('mousemove', bump);
+  document.addEventListener('keydown', bump);
+  document.addEventListener('mousedown', bump);
   FT.tickInterval = setInterval(ftTick, 1000);
   ftFetchCurrentSession();
 }
@@ -1101,17 +1139,46 @@ async function ftFetchCurrentSession() {
     if (sess && sess.id) {
       FT.sessionId = sess.id;
       FT.sessionStartMs = new Date(sess.start_time).getTime();
+      FT.active = true;
+      window.electronAPI?.setFocusState(true);
     }
   } catch (e) {}
 }
 
+async function ftCheckIdle() {
+  const isIdle = (Date.now() - FT.lastActivityMs) > FT.idleThresholdMs;
+  if (isIdle && FT.active) {
+    FT.active = false;
+    if (FT.sessionId) {
+      try { await api('PATCH', `/api/work-sessions/${FT.sessionId}/end`); } catch (e) {}
+      FT.sessionId = null;
+      FT.sessionStartMs = null;
+    }
+    window.electronAPI?.setFocusState(false);
+    await ftLoadSessions();
+  } else if (!isIdle && !FT.active) {
+    FT.active = true;
+    try {
+      const sess = await api('POST', '/api/work-sessions');
+      FT.sessionId = sess.id;
+      FT.sessionStartMs = new Date(sess.start_time).getTime();
+    } catch (e) {}
+    window.electronAPI?.setFocusState(true);
+  }
+}
+
 async function ftTick() {
   FT.tickCount++;
+  await ftCheckIdle();
   ftUpdateUI();
   ftUpdateTodaySummary();
   if (FT.tickCount % 10 === 0) ftRenderSessions();
   if (FT.tickCount % 60 === 0) await ftLoadSessions();
 }
+
+const CIRCUMFERENCE    = 326.73;
+const SESSION_MAX_SECS = 5400; // 90 minutes per round
+const ROUND_COLORS = ['#22c55e', '#6366f1', '#f59e0b', '#2dd4bf', '#f472b6', '#fb923c'];
 
 function ftUpdateUI() {
   const dot    = document.getElementById('ft-dot');
@@ -1122,21 +1189,57 @@ function ftUpdateUI() {
   const ring   = document.getElementById('ft-ring-fill');
   if (!dot) return;
 
-  const CIRCUMFERENCE = 326.73;
-  const SESSION_MAX_SECS = 3600;
+  const startEl   = document.getElementById('ft-session-start');
+  const lapDotsEl = document.getElementById('ft-lap-dots');
 
-  dot.classList.add('active');
-  if (navDot) navDot.classList.add('active');
-  if (label)  { label.textContent = 'Working'; label.classList.add('active'); }
-  if (timer)  timer.classList.add('active');
-  if (hint)   hint.textContent = '';
-  if (FT.sessionStartMs) {
-    const secs = Math.floor((Date.now() - FT.sessionStartMs) / 1000);
+  if (FT.active && FT.sessionStartMs) {
+    dot.classList.add('active');
+    if (navDot) navDot.classList.add('active');
+    if (label)  { label.textContent = 'Working'; label.classList.add('active'); }
+    if (timer)  timer.classList.add('active');
+    if (hint)   hint.textContent = '';
+
+    const secs      = Math.floor((Date.now() - FT.sessionStartMs) / 1000);
+    const round     = Math.floor(secs / SESSION_MAX_SECS);
+    const roundSecs = secs % SESSION_MAX_SECS;
+    const color     = ROUND_COLORS[round % ROUND_COLORS.length];
+
     if (timer) timer.textContent = fmtDuration(secs);
     if (ring) {
-      const progress = Math.min(secs / SESSION_MAX_SECS, 1);
-      ring.style.strokeDashoffset = CIRCUMFERENCE * (1 - progress);
+      ring.style.stroke        = color;
+      ring.style.filter        = `drop-shadow(0 0 8px ${color}70)`;
+      ring.style.strokeDashoffset = CIRCUMFERENCE * (1 - roundSecs / SESSION_MAX_SECS);
       ring.classList.add('active');
+    }
+    if (startEl) {
+      const d = new Date(FT.sessionStartMs);
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      startEl.textContent = `Started at ${hh}:${mm}`;
+    }
+    if (lapDotsEl) {
+      lapDotsEl.innerHTML = round === 0 ? '' : Array.from({ length: round }, (_, i) =>
+        `<span class="ft-lap-dot" style="background:${ROUND_COLORS[i % ROUND_COLORS.length]}"></span>`
+      ).join('');
+    }
+  } else {
+    dot.classList.remove('active');
+    if (navDot) navDot.classList.remove('active');
+    if (label)  { label.textContent = 'Idle'; label.classList.remove('active'); }
+    if (timer)  { timer.textContent = '–'; timer.classList.remove('active'); }
+    if (ring) {
+      ring.style.strokeDashoffset = CIRCUMFERENCE;
+      ring.style.stroke           = '';
+      ring.style.filter           = '';
+      ring.classList.remove('active');
+    }
+    if (startEl)   startEl.textContent = '';
+    if (lapDotsEl) lapDotsEl.innerHTML = '';
+    if (hint) {
+      const idleSecs = Math.floor((Date.now() - FT.lastActivityMs) / 1000);
+      hint.textContent = idleSecs > FT.idleThresholdMs / 1000
+        ? `Away for ${fmtDuration(idleSecs)}`
+        : 'Move mouse or press a key to start';
     }
   }
 }
@@ -1148,6 +1251,8 @@ async function ftClearToday() {
   const sess = await api('POST', '/api/work-sessions');
   FT.sessionId = sess.id;
   FT.sessionStartMs = new Date(sess.start_time).getTime();
+  FT.active = true;
+  FT.lastActivityMs = Date.now();
   FT.sessions = [];
   ftRenderTimeline();
   ftRenderSessions();
@@ -1157,7 +1262,10 @@ async function ftClearToday() {
 async function ftLoadSessions() {
   try {
     const today = new Date().toISOString().slice(0, 10);
-    FT.sessions = await api('GET', `/api/work-sessions?date=${today}`);
+    [FT.sessions, FT.appEvents] = await Promise.all([
+      api('GET', `/api/work-sessions?date=${today}`),
+      api('GET', `/api/app-events?date=${today}`),
+    ]);
     ftRenderTimeline();
     ftRenderSessions();
     ftUpdateTodaySummary();
@@ -1169,37 +1277,51 @@ async function ftLoadSessions() {
 function ftRenderTimeline() {
   const el = document.getElementById('ft-timeline');
   if (!el) return;
-  const sorted = [...FT.sessions].filter(s => s.start_time)
-    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-  if (!sorted.length) { el.style.display = 'none'; return; }
   el.style.display = '';
 
   const now = new Date();
-  const dayStart = new Date(sorted[0].start_time);
-  const dayEnd = now;
-  const totalMs = dayEnd - dayStart;
-  if (totalMs <= 0) return;
+  const d   = now;
+  const windowStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 7, 0, 0);
+  const windowEnd   = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0);
+  const totalMs     = windowEnd - windowStart;
 
-  const segments = [];
-  let cursor = dayStart;
-  for (const s of sorted) {
+  const clamp = t => Math.max(windowStart.getTime(), Math.min(windowEnd.getTime(), t));
+  const pct   = t => ((clamp(t) - windowStart.getTime()) / totalMs * 100).toFixed(3) + '%';
+
+  // Session blocks
+  let segHtml = '';
+  for (const s of FT.sessions) {
+    if (!s.start_time) continue;
     const sStart = new Date(s.start_time);
     const sEnd   = s.end_time ? new Date(s.end_time) : now;
-    if (sStart > cursor) segments.push({ type: 'idle', start: cursor, end: sStart });
-    segments.push({ type: 'work', start: sStart, end: sEnd });
-    cursor = sEnd;
+    if (sEnd < windowStart || sStart > windowEnd) continue;
+    const left  = pct(sStart.getTime());
+    const width = ((clamp(sEnd.getTime()) - clamp(sStart.getTime())) / totalMs * 100).toFixed(3) + '%';
+    const isActive = !s.end_time;
+    const dur = s.duration_seconds ? fmtDuration(s.duration_seconds) : (isActive ? fmtDuration(Math.floor((now - sStart) / 1000)) : '');
+    segHtml += `<div class="ft-tl-seg${isActive ? ' ft-tl-seg--active' : ''}"
+      style="left:${left};width:${width}"
+      title="${fmtTimeOnly(sStart.toISOString())} → ${isActive ? 'now' : fmtTimeOnly(sEnd.toISOString())} · ${dur}"></div>`;
   }
-  if (cursor < now) segments.push({ type: 'idle', start: cursor, end: now });
 
-  let bar = '<div class="ft-tl-bar">';
-  for (const seg of segments) {
-    const w = ((seg.end - seg.start) / totalMs * 100).toFixed(2);
-    bar += `<div class="ft-tl-seg ft-tl-seg--${seg.type}" style="width:${w}%"
-      title="${fmtTimeOnly(seg.start.toISOString())} – ${fmtTimeOnly(seg.end.toISOString())} · ${seg.type === 'work' ? 'working' : 'away'}"></div>`;
+  // "Now" needle
+  const nowHtml = (now >= windowStart && now <= windowEnd)
+    ? `<div class="ft-tl-now" style="left:${pct(now.getTime())}"></div>`
+    : '';
+
+  // Hour ticks + labels
+  let tickHtml = '', labelHtml = '';
+  for (let h = 7; h < 24; h += 2) {
+    const t = new Date(d.getFullYear(), d.getMonth(), d.getDate(), h, 0, 0);
+    const p = pct(t.getTime());
+    const lbl = h === 0 ? '12am' : h === 12 ? '12pm' : h > 12 ? `${h - 12}pm` : `${h}am`;
+    tickHtml  += `<div class="ft-tl-tick" style="left:${p}"></div>`;
+    labelHtml += `<div class="ft-tl-tick-label" style="left:${p}">${lbl}</div>`;
   }
-  bar += '</div>';
-  bar += `<div class="ft-tl-labels"><span>${fmtTimeOnly(dayStart.toISOString())}</span><span>now</span></div>`;
-  el.innerHTML = bar;
+
+  el.innerHTML = `
+    <div class="ft-tl-bar">${tickHtml}${segHtml}${nowHtml}</div>
+    <div class="ft-tl-ticks-row">${labelHtml}</div>`;
 }
 
 function ftUpdateTodaySummary() {
@@ -1209,9 +1331,9 @@ function ftUpdateTodaySummary() {
   if (!totalEl) return;
   const completed   = FT.sessions.filter(s => s.duration_seconds != null);
   const activeSecs  = FT.sessionStartMs ? Math.floor((Date.now() - FT.sessionStartMs) / 1000) : 0;
-  const totalSecs   = completed.reduce((sum, s) => sum + s.duration_seconds, 0) + activeSecs;
   const longestSecs = completed.length ? Math.max(...completed.map(s => s.duration_seconds)) : 0;
-  totalEl.textContent   = totalSecs ? fmtDuration(totalSecs) : '–';
+  const totalSecs   = completed.reduce((sum, s) => sum + s.duration_seconds, 0) + activeSecs;
+  totalEl.textContent   = totalSecs > 0 ? fmtDuration(totalSecs) : '–';
   if (countEl)   countEl.textContent   = completed.length + (FT.sessionId ? 1 : 0);
   if (longestEl) longestEl.textContent = longestSecs ? fmtDuration(longestSecs) : '–';
 }
@@ -1247,19 +1369,156 @@ function ftRenderSessions() {
     </div>`;
 
     // Gap to previous session (list is newest-first)
-    if (i < sorted.length - 1 && sorted[i + 1].end_time && s.start_time) {
-      const gapSecs = Math.round((new Date(s.start_time) - new Date(sorted[i + 1].end_time)) / 1000);
+    if (i < sorted.length - 1 && s.start_time) {
+      const prev       = sorted[i + 1];
+      if (!prev.start_time) continue;
+      const prevEndMs  = prev.end_time ? new Date(prev.end_time).getTime() : null;
+      const gapEndMs   = new Date(s.start_time).getTime();
+      const gapStartMs = prevEndMs ?? new Date(prev.start_time).getTime();
+      const gapSecs    = Math.round((gapEndMs - gapStartMs) / 1000);
+
       if (gapSecs > 30) {
-        html += `<div class="ft-gap-row">
-          <div class="ft-gap-line"></div>
-          <span class="ft-gap-label">${fmtDuration(gapSecs)} away</span>
-          <div class="ft-gap-line"></div>
+        // App was closed if any recorded start event falls inside this gap window
+        const appWasClosed = FT.appEvents.some(e => {
+          const ts = new Date(e.timestamp).getTime();
+          return ts > gapStartMs && ts <= gapEndMs;
+        });
+        const gapStart     = fmtTimeOnly(prev.end_time || prev.start_time);
+        const gapEnd       = fmtTimeOnly(s.start_time);
+        const icon         = appWasClosed
+          ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64A9 9 0 1 1 5.64 5.64"/><line x1="12" y1="2" x2="12" y2="12"/></svg>`
+          : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>`;
+        const label        = appWasClosed ? 'App not running' : 'Away from desk';
+        html += `<div class="ft-gap-row${appWasClosed ? ' ft-gap-row--closed' : ''}">
+          <span class="ft-gap-icon">${icon}</span>
+          <span class="ft-gap-times">${esc(gapStart)} – ${esc(gapEnd)}</span>
+          <span class="ft-gap-label">${esc(label)}</span>
+          <span class="ft-gap-dur">${fmtDuration(gapSecs)}</span>
         </div>`;
       }
     }
   }
   html += '</div>';
   el.innerHTML = html;
+}
+
+function fmtHours(secs) {
+  if (!secs) return '0m';
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h === 0) return `${m}m`;
+  if (m === 0) return `${h}h`;
+  return `${h}h ${m}m`;
+}
+
+function ftShowTab(tab) {
+  const todayPanel = document.getElementById('ft-panel-today');
+  const statsPanel = document.getElementById('ft-panel-stats');
+  const todayBtn   = document.getElementById('ft-tab-today');
+  const statsBtn   = document.getElementById('ft-tab-stats');
+  if (!todayPanel) return;
+  todayPanel.style.display = tab === 'today' ? '' : 'none';
+  statsPanel.style.display = tab === 'stats' ? '' : 'none';
+  todayBtn?.classList.toggle('active', tab === 'today');
+  statsBtn?.classList.toggle('active', tab === 'stats');
+  // Sync sidebar sub-buttons
+  document.getElementById('nav-ft-today-btn')?.classList.toggle('active', tab === 'today');
+  document.getElementById('nav-ft-stats-btn')?.classList.toggle('active', tab === 'stats');
+  if (tab === 'stats') ftLoadStats();
+}
+
+function showFocusStats() {
+  showPage('focustime');
+  ftShowTab('stats');
+}
+
+async function ftLoadStats() {
+  try {
+    const all = await api('GET', '/api/work-sessions');
+
+    // Group completed sessions by date
+    const byDate = {};
+    for (const s of all) {
+      if (!s.date || !s.duration_seconds) continue;
+      byDate[s.date] = (byDate[s.date] || 0) + s.duration_seconds;
+    }
+
+    // Add current active session to today
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    if (FT.active && FT.sessionStartMs) {
+      byDate[today] = (byDate[today] || 0) + Math.floor((Date.now() - FT.sessionStartMs) / 1000);
+    }
+
+    // Build last 30 days (oldest → newest)
+    const days = [];
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      const key = d.toISOString().slice(0, 10);
+      days.push({ date: key, secs: byDate[key] || 0, dow: d.getDay(), d });
+    }
+
+    // Week boundaries (Monday-based)
+    const dow = now.getDay();
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - ((dow + 6) % 7));
+    weekStart.setHours(0, 0, 0, 0);
+    const weekStartStr = weekStart.toISOString().slice(0, 10);
+
+    const lastWeekStart = new Date(weekStart);
+    lastWeekStart.setDate(weekStart.getDate() - 7);
+    const lastWeekEnd = new Date(weekStart);
+    lastWeekEnd.setDate(weekStart.getDate() - 1);
+    const lastWeekStartStr = lastWeekStart.toISOString().slice(0, 10);
+    const lastWeekEndStr   = lastWeekEnd.toISOString().slice(0, 10);
+
+    let weekTotal = 0, lastWeekTotal = 0, bestSecs = 0;
+    for (const [date, secs] of Object.entries(byDate)) {
+      if (date >= weekStartStr && date <= today) weekTotal += secs;
+      if (date >= lastWeekStartStr && date <= lastWeekEndStr) lastWeekTotal += secs;
+      if (secs > bestSecs) bestSecs = secs;
+    }
+
+    const activeDays = days.filter(d => d.secs > 0);
+    const avg30 = activeDays.length
+      ? days.reduce((s, d) => s + d.secs, 0) / activeDays.length
+      : 0;
+
+    // KPIs
+    document.getElementById('fts-week-total').textContent     = fmtHours(weekTotal);
+    document.getElementById('fts-lastweek-total').textContent = fmtHours(lastWeekTotal);
+    document.getElementById('fts-avg-day').textContent        = avg30 ? fmtHours(avg30) : '–';
+    document.getElementById('fts-best-day').textContent       = bestSecs ? fmtHours(bestSecs) : '–';
+
+    // Bar chart
+    const maxSecs = Math.max(...days.map(d => d.secs), 1);
+    const barsEl  = document.getElementById('fts-bars');
+    const labelsEl = document.getElementById('fts-bars-labels');
+    if (!barsEl) return;
+
+    barsEl.innerHTML = days.map(({ date, secs, dow, d }) => {
+      const pct = secs > 0 ? Math.max(Math.round((secs / maxSecs) * 100), 4) : 0;
+      const isWeekend = dow === 0 || dow === 6;
+      const isToday   = date === today;
+      const label     = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      const tip = `${label}: ${fmtHours(secs)}`;
+      let cls = 'fts-bar';
+      if (isWeekend) cls += ' fts-bar--weekend';
+      if (secs === 0) cls += ' fts-bar--empty';
+      return `<div class="fts-bar-col${isToday ? ' fts-bar-col--today' : ''}" title="${tip}">
+        <div class="${cls}" style="height:${pct}%"></div>
+      </div>`;
+    }).join('');
+
+    if (labelsEl) {
+      labelsEl.innerHTML = days.map(({ d }, i) => {
+        const show = (29 - i) % 7 === 0;
+        const label = show ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
+        return `<div class="fts-bar-daylabel">${label}</div>`;
+      }).join('');
+    }
+  } catch (e) {}
 }
 
 // ── Home page ─────────────────────────────────────────────────────────────────
@@ -1278,36 +1537,43 @@ async function homeInit() {
 
   try {
     const today = now.toISOString().slice(0, 10);
-    const sessions = await api('GET', `/api/work-sessions?date=${today}`);
+    const [sessions, current] = await Promise.all([
+      api('GET', `/api/work-sessions?date=${today}`),
+      api('GET', '/api/work-sessions/current'),
+    ]);
     const completed = sessions.filter(s => s.duration_seconds != null);
-    const totalSecs = completed.reduce((sum, s) => sum + s.duration_seconds, 0);
+    const activeStartMs = FT.sessionStartMs
+      || (current?.start_time ? new Date(current.start_time).getTime() : null);
+    const activeSecs = activeStartMs ? Math.floor((Date.now() - activeStartMs) / 1000) : 0;
+    const totalSecs = completed.reduce((sum, s) => sum + s.duration_seconds, 0) + activeSecs;
     const focusEl = document.getElementById('home-focus-time');
     if (focusEl) focusEl.textContent = totalSecs > 0 ? fmtDuration(totalSecs) : '0m';
   } catch (_) {}
 
   try {
     const data = await api('GET', '/api/calendar/events?days=1');
-    const nextMeetingEl = document.getElementById('home-next-meeting');
-    if (nextMeetingEl) {
-      if (!data.ok) {
-        nextMeetingEl.textContent = 'Outlook unavailable';
-      } else {
-        const upcoming = (data.events || []).filter(e => new Date(e.end) > now);
-        if (upcoming.length) {
-          const e = upcoming[0];
-          const startTime = new Date(e.start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-          nextMeetingEl.textContent = `${startTime} · ${e.subject || 'Meeting'}`;
-        } else {
-          nextMeetingEl.textContent = 'No more today';
-        }
-      }
-    }
     S.calEvents = data.ok ? (data.events || []) : [];
     _updateMeetingSuggestions(now);
-  } catch (_) {
-    const nextMeetingEl = document.getElementById('home-next-meeting');
-    if (nextMeetingEl) nextMeetingEl.textContent = 'Unavailable';
-  }
+    if (data.ok) {
+      const upcoming = S.calEvents.filter(e => new Date(e.end) > now);
+      const card = document.getElementById('home-next-card');
+      if (card && upcoming.length) {
+        const e = upcoming[0];
+        const start = new Date(e.start);
+        const startStr = start.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+        const diffMs = start - now;
+        const diffMin = Math.round(diffMs / 60000);
+        const timeHint = diffMs < 0
+          ? 'In progress'
+          : diffMin < 60 ? `In ${diffMin}m` : `At ${startStr}`;
+        document.getElementById('home-next-title').textContent = e.subject || 'Meeting';
+        document.getElementById('home-next-time').textContent = `${startStr} · ${timeHint}`;
+        card.style.display = '';
+      } else if (card) {
+        card.style.display = 'none';
+      }
+    }
+  } catch (_) {}
 }
 
 function _updateMeetingSuggestions(now) {
@@ -1352,23 +1618,26 @@ function homeRenderRecent() {
     return;
   }
   const now = Date.now();
-  let html = '<div class="home-recent-list">';
+  let html = '';
   for (const r of recent) {
     const color = projectColor(r.project) || 'var(--border2)';
     const title = r.meeting || r.project || 'Untitled';
-    const project = r.project ? `<span>${esc(r.project)}</span> · ` : '';
-    const dur = r.duration ? fmtDuration(r.duration) : '';
+    const parts = [];
+    if (r.project) parts.push(esc(r.project));
+    if (r.duration) parts.push(fmtDuration(r.duration));
+    const meta = parts.join(' · ');
     const ago = r.start_time ? timeAgo(new Date(r.start_time), now) : '';
-    html += `<div class="home-rec-row" onclick="showPage('history')">
+    const noteBadge = r.has_notes ? '<span class="home-rec-badge">notes</span>' : '';
+    const txBadge = r.has_transcript ? '<span class="home-rec-badge">transcript</span>' : '';
+    html += `<div class="home-rec-row" onclick="scrollToCard(${r.id})">
       <div class="home-rec-strip" style="background:${color}"></div>
       <div class="home-rec-info">
         <div class="home-rec-title">${esc(title)}</div>
-        <div class="home-rec-meta">${project}${dur}</div>
+        <div class="home-rec-meta"><span>${meta}</span>${noteBadge}${txBadge}</div>
       </div>
       <div class="home-rec-time">${esc(ago)}</div>
     </div>`;
   }
-  html += '</div>';
   el.innerHTML = html;
 }
 
@@ -1384,235 +1653,6 @@ function timeAgo(date, nowMs) {
   return `${diffD}d ago`;
 }
 
-// ── Projects ──────────────────────────────────────────────────────────────────
-
-const PROJ_M = { mode: 'create', editId: null, phases: [], streams: [], selectedColor: '' };
-
-async function projLoad() {
-  try {
-    S.projects = await fetch('/api/projects').then(r => r.json());
-  } catch (_) {}
-}
-
-async function projLoadAndRender() {
-  await projLoad();
-  projRender();
-}
-
-function projRender() {
-  const grid    = document.getElementById('proj-grid');
-  const empty   = document.getElementById('proj-empty');
-  const countEl = document.getElementById('proj-count');
-  if (!grid) return;
-  if (!S.projects.length) {
-    grid.innerHTML = '';
-    if (empty)   empty.style.display = '';
-    if (countEl) countEl.textContent = '';
-    return;
-  }
-  if (empty)   empty.style.display = 'none';
-  if (countEl) countEl.textContent = `${S.projects.length} project${S.projects.length !== 1 ? 's' : ''}`;
-  grid.innerHTML = S.projects.map(renderProjectCard).join('');
-}
-
-function renderProjectCard(p) {
-  const color       = p.color || projectColor(p.name) || 'var(--border2)';
-  const statusClass = { Active: 'status-active', 'On Hold': 'status-hold', Done: 'status-done' }[p.status] || '';
-  const lastDate    = p.last_recording ? fmtDateOnly(p.last_recording) : '—';
-  const totalDur    = p.total_duration > 0 ? fmtDuration(p.total_duration) : '—';
-  const nameJson    = JSON.stringify(p.name);
-  const phasesHtml  = p.phases.map(ph => `<span class="proj-chip">${esc(ph)}</span>`).join('');
-  const streamsHtml = p.streams.map(s  => `<span class="proj-chip proj-chip--stream">${esc(s)}</span>`).join('');
-  return `
-<div class="proj-card" style="--proj-accent:${color}">
-  <div class="proj-card-color-strip" style="background:${color}"></div>
-  <div class="proj-card-body">
-    <div class="proj-card-head">
-      <span class="proj-card-name">${esc(p.name)}</span>
-      <span class="proj-status-badge ${statusClass}">${esc(p.status)}</span>
-    </div>
-    ${p.client      ? `<div class="proj-card-client">${esc(p.client)}</div>` : ''}
-    ${p.description ? `<div class="proj-card-desc">${esc(p.description)}</div>` : ''}
-    <div class="proj-card-stats">
-      <div class="proj-stat"><span class="proj-stat-value">${p.recording_count}</span><span class="proj-stat-label">Recordings</span></div>
-      <div class="proj-stat"><span class="proj-stat-value">${esc(totalDur)}</span><span class="proj-stat-label">Total</span></div>
-      <div class="proj-stat"><span class="proj-stat-value proj-stat-value--sm">${esc(lastDate)}</span><span class="proj-stat-label">Last</span></div>
-    </div>
-    ${(phasesHtml || streamsHtml) ? `<div class="proj-card-chips">${phasesHtml}${streamsHtml}</div>` : ''}
-    <div class="proj-card-actions">
-      <button class="proj-view-recs-btn" onclick="projViewRecordings(${nameJson})">View recordings →</button>
-      <button class="proj-edit-btn" onclick="projOpenEdit(${p.id})">Edit</button>
-      <button class="proj-delete-btn" onclick="projDelete(${p.id})">Delete</button>
-    </div>
-  </div>
-</div>`;
-}
-
-function projOpenCreate() {
-  PROJ_M.mode = 'create'; PROJ_M.editId = null; PROJ_M.phases = []; PROJ_M.streams = []; PROJ_M.selectedColor = '';
-  document.getElementById('proj-modal-title').textContent = 'New project';
-  document.getElementById('proj-m-save').textContent = 'Create';
-  document.getElementById('proj-m-name').value = '';
-  document.getElementById('proj-m-client').value = '';
-  document.getElementById('proj-m-description').value = '';
-  document.getElementById('proj-m-objective').value = '';
-  document.getElementById('proj-m-error').textContent = '';
-  projSetStatus('Active');
-  projRenderColorPicker();
-  projRenderChips('phases');
-  projRenderChips('streams');
-  document.getElementById('proj-modal-overlay').style.display = '';
-  setTimeout(() => document.getElementById('proj-m-name').focus(), 50);
-}
-
-function projOpenEdit(id) {
-  const proj = S.projects.find(p => p.id === id);
-  if (!proj) return;
-  PROJ_M.mode = 'edit'; PROJ_M.editId = id;
-  PROJ_M.phases = [...proj.phases]; PROJ_M.streams = [...proj.streams]; PROJ_M.selectedColor = proj.color || '';
-  document.getElementById('proj-modal-title').textContent = 'Edit project';
-  document.getElementById('proj-m-save').textContent = 'Save';
-  document.getElementById('proj-m-name').value = proj.name;
-  document.getElementById('proj-m-client').value = proj.client;
-  document.getElementById('proj-m-description').value = proj.description;
-  document.getElementById('proj-m-objective').value = proj.objective;
-  document.getElementById('proj-m-error').textContent = '';
-  projSetStatus(proj.status);
-  projRenderColorPicker();
-  projRenderChips('phases');
-  projRenderChips('streams');
-  document.getElementById('proj-modal-overlay').style.display = '';
-  setTimeout(() => document.getElementById('proj-m-name').focus(), 50);
-}
-
-function projCloseModal() {
-  const overlay = document.getElementById('proj-modal-overlay');
-  if (overlay) overlay.style.display = 'none';
-}
-
-function projSetStatus(value) {
-  document.querySelectorAll('#proj-m-status .seg-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.value === value);
-  });
-}
-
-function projGetStatus() {
-  const active = document.querySelector('#proj-m-status .seg-btn.active');
-  return active ? active.dataset.value : 'Active';
-}
-
-function projRenderColorPicker() {
-  const container = document.getElementById('proj-m-colors');
-  if (!container) return;
-  container.innerHTML = '';
-  const noneBtn = document.createElement('button');
-  noneBtn.type = 'button';
-  noneBtn.className = 'color-swatch color-swatch--none' + (!PROJ_M.selectedColor ? ' selected' : '');
-  noneBtn.title = 'None';
-  noneBtn.onclick = () => { PROJ_M.selectedColor = ''; projRenderColorPicker(); };
-  container.appendChild(noneBtn);
-  PROJECT_PALETTE.forEach(color => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'color-swatch' + (PROJ_M.selectedColor === color ? ' selected' : '');
-    btn.style.background = color;
-    btn.title = color;
-    btn.onclick = () => { PROJ_M.selectedColor = color; projRenderColorPicker(); };
-    container.appendChild(btn);
-  });
-}
-
-function projRenderChips(field) {
-  const list = document.getElementById(`proj-m-${field}-chips`);
-  if (!list) return;
-  list.innerHTML = PROJ_M[field].map((chip, i) =>
-    `<span class="chip-item">${esc(chip)}<button class="chip-remove" type="button" onclick="projRemoveChip('${field}',${i})">×</button></span>`
-  ).join('');
-}
-
-function projAddChip(field) {
-  const input = document.getElementById(`proj-m-${field}-input`);
-  if (!input) return;
-  const val = input.value.trim();
-  if (!val || PROJ_M[field].includes(val)) { input.value = ''; return; }
-  PROJ_M[field].push(val);
-  input.value = '';
-  projRenderChips(field);
-}
-
-function projRemoveChip(field, idx) {
-  PROJ_M[field].splice(idx, 1);
-  projRenderChips(field);
-}
-
-async function projModalSave() {
-  const name   = document.getElementById('proj-m-name').value.trim();
-  const status = projGetStatus();
-  const errorEl = document.getElementById('proj-m-error');
-  if (!name) { errorEl.textContent = 'Name is required.'; return; }
-  errorEl.textContent = '';
-
-  const payload = {
-    name, status,
-    client:      document.getElementById('proj-m-client').value.trim(),
-    description: document.getElementById('proj-m-description').value.trim(),
-    objective:   document.getElementById('proj-m-objective').value.trim(),
-    phases:      [...PROJ_M.phases],
-    streams:     [...PROJ_M.streams],
-    color:       PROJ_M.selectedColor,
-  };
-
-  const saveBtn = document.getElementById('proj-m-save');
-  saveBtn.disabled = true;
-  try {
-    const url    = PROJ_M.mode === 'create' ? '/api/projects' : `/api/projects/${PROJ_M.editId}`;
-    const method = PROJ_M.mode === 'create' ? 'POST' : 'PATCH';
-    const resp   = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    if (!resp.ok) {
-      const data = await resp.json();
-      errorEl.textContent = data.detail || 'Error saving project.';
-      return;
-    }
-    await projLoad();
-    projRender();
-    updateProjectFilter();
-    projCloseModal();
-  } catch (e) {
-    errorEl.textContent = 'Network error: ' + e.message;
-  } finally {
-    saveBtn.disabled = false;
-  }
-}
-
-async function projDelete(id) {
-  if (!confirm('Delete this project? Recordings will keep their project tag.')) return;
-  await fetch(`/api/projects/${id}`, { method: 'DELETE' });
-  S.projects = S.projects.filter(p => p.id !== id);
-  projRender();
-  updateProjectFilter();
-}
-
-function projViewRecordings(name) {
-  showPage('history');
-  const bubbles = document.querySelectorAll('#project-bubbles .proj-bubble');
-  const bubble  = [...bubbles].find(b => b.dataset.project === name);
-  if (bubble && !bubble.classList.contains('active')) {
-    bubble.click();
-  } else if (!bubble) {
-    clearFilter();
-  }
-}
-
-function projInitModalListeners() {
-  ['phases', 'streams'].forEach(field => {
-    const input = document.getElementById(`proj-m-${field}-input`);
-    if (input) input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); projAddChip(field); } });
-  });
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && document.getElementById('proj-modal-overlay')?.style.display !== 'none') projCloseModal();
-  });
-}
-
 // ── Tools & MCP page ─────────────────────────────────────────────────────────
 
 const _VENV = String.raw`C:\Users\p.ledesma.jimenez\scripts\SmartRecorder\.venv\Scripts\python.exe`;
@@ -1621,7 +1661,6 @@ const _ROOT = String.raw`C:\Users\p.ledesma.jimenez\scripts\SmartRecorder`;
 const _TOOLS_CONFIG = {
   mcpServers: {
     'hub-recordings': { command: _VENV, args: [_ROOT + String.raw`\mcp\recordings_server.py`] },
-    'hub-projects':   { command: _VENV, args: [_ROOT + String.raw`\mcp\projects_server.py`] },
     'hub-focus':      { command: _VENV, args: [_ROOT + String.raw`\mcp\focus_server.py`] },
     'hub-calendar':   { command: _VENV, args: [_ROOT + String.raw`\mcp\calendar_server.py`] },
     'hub-onenote':    { command: _VENV, args: [_ROOT + String.raw`\mcp\onenote_server.py`] },
@@ -1679,13 +1718,6 @@ function toolsSearchLocal() {
   out.textContent = hits.length ? JSON.stringify(hits, null, 2) : `No matches for "${q}" in project/meeting names.\nFull transcript search runs in MCP layer.`;
 }
 
-function toolsAssignProject() {
-  const rid = document.getElementById('tr-assign-rid')?.value?.trim();
-  const proj = document.getElementById('tr-assign-proj')?.value?.trim() ?? '';
-  if (!rid) { const o = document.getElementById('tr-assign'); o.style.display='block'; o.textContent='Enter a Recording ID.'; return; }
-  toolsRun('PATCH', `/api/recordings/${rid}/tags`, { field: 'project', value: proj }, 'tr-assign');
-}
-
 function toolsStartRec() {
   const source = document.getElementById('tr-start-src')?.value || 'both';
   toolsRun('POST', '/api/record/start', { source }, 'tr-start');
@@ -1707,12 +1739,11 @@ function toolsCopyConfig(btn) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   loadDevices();
-  await Promise.all([loadRecordings(), projLoad()]);
+  await loadRecordings();
   homeInit();
   connectWS();
   connectChatWS();
   initVuMeter();
   initFocusTime();
-  projInitModalListeners();
   window.electronAPI?.onNavigate?.(name => showPage(name));
 });

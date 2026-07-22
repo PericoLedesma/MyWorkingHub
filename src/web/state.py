@@ -20,9 +20,11 @@ _levels_lock = threading.Lock()
 recording: bool = False
 recording_start: float | None = None   # time.time() value when recording started
 stop_event: threading.Event | None = None
+recording_thread: threading.Thread | None = None
 
 # Monitor state (level-only streams, no saving)
 monitor_stop: threading.Event | None = None
+monitor_thread: threading.Thread | None = None
 
 # In-progress job id sets (all mutations must happen on the event loop)
 transcribing: set[int] = set()
@@ -34,6 +36,10 @@ chat_history: list[dict] = []
 # Server-managed focus session (started on launch, ended on shutdown)
 focus_session_id: int | None = None
 focus_session_start: str | None = None
+
+# Accumulated live transcript segments for the current recording
+# Each entry: (timestamp, text, speaker)
+live_segments: list[tuple[str, str, str]] = []
 
 
 def init(event_loop: asyncio.AbstractEventLoop) -> None:

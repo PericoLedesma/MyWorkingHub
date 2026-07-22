@@ -7,312 +7,448 @@
 
     html, body {
       width: 48px;
-      height: 316px;
+      height: 390px;
       overflow: hidden;
       background: transparent;
     }
 
-    /* ── HUB handle (top) ── */
-    .handle {
+    :root {
+      --indigo:      #6366f1;
+      --indigo-lt:   #818cf8;
+      --indigo-faint: rgba(99,102,241,.15);
+      --border:      rgba(99,102,241,.30);
+      --divider:     rgba(99,102,241,.11);
+      --bg:          #111126;
+      --bg-deep:     #0b0b1a;
+      --text-dim:    #484870;
+      --text-muted:  #30304e;
+      --green:       #22c55e;
+      --amber:       #f59e0b;
+      --red:         #ef4444;
+    }
+
+    /* ── Single outer shell ── */
+    .shell {
       width: 48px;
-      height: 96px;
-      background: linear-gradient(160deg, #1c1c35 0%, #141428 100%);
-      border: 1px solid rgba(99, 102, 241, 0.38);
+      height: 390px;
+      display: flex;
+      flex-direction: column;
+      background: linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
+      border: 1px solid var(--border);
       border-right: none;
-      border-radius: 12px 0 0 0;
-      box-shadow: -4px 0 20px rgba(0, 0, 0, 0.6), inset 1px 0 0 rgba(255,255,255,0.04);
+      border-radius: 14px 0 0 14px;
+      overflow: hidden;
+      box-shadow: -4px 0 28px rgba(0,0,0,.6), inset 1px 0 0 rgba(255,255,255,.03);
+    }
+
+    .divider {
+      width: 100%; height: 1px;
+      background: var(--divider);
+      flex-shrink: 0;
+    }
+
+    /* ── Shared section base ── */
+    .sec {
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       gap: 7px;
+      flex-shrink: 0;
       cursor: pointer;
       -webkit-app-region: no-drag;
       user-select: none;
-      transition: background 0.15s, box-shadow 0.15s;
+      transition: background 0.14s;
     }
-    .handle:hover {
-      background: linear-gradient(160deg, #222244 0%, #1a1a38 100%);
-      box-shadow: -4px 0 24px rgba(99, 102, 241, 0.25), inset 1px 0 0 rgba(255,255,255,0.06);
-    }
-    .handle:active { background: linear-gradient(160deg, #181830 0%, #111122 100%); }
+    .sec:hover  { background: rgba(99,102,241,.07); }
+    .sec:active { background: rgba(99,102,241,.03); }
 
-    .icon { color: #6366f1; flex-shrink: 0; transition: color 0.15s; }
-    .handle:hover .icon { color: #818cf8; }
+    /* ── HUB (86 px) ── */
+    .hub { height: 86px; }
 
-    .label {
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: 8px; font-weight: 700; letter-spacing: 2px;
-      color: #4f4f8f;
-      writing-mode: vertical-rl; text-orientation: mixed;
-      transition: color 0.15s;
+    .hub-icon { color: var(--indigo); transition: color .15s; }
+    .hub:hover .hub-icon { color: var(--indigo-lt); }
+
+    .hub-label {
+      font: 700 7px/1 'Segoe UI', system-ui, sans-serif;
+      letter-spacing: 3.5px; text-transform: uppercase;
+      color: var(--text-dim);
+      transition: color .15s;
     }
-    .handle:hover .label { color: #6366f1; }
+    .hub:hover .hub-label { color: var(--indigo); }
 
     .focus-dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: #2e2e44; flex-shrink: 0;
-      transition: background 0.4s, box-shadow 0.4s;
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #222240;
+      transition: background .4s, box-shadow .4s;
     }
     .focus-dot.active {
-      background: #22c55e;
-      box-shadow: 0 0 7px rgba(34, 197, 94, 0.8);
+      background: var(--green);
+      box-shadow: 0 0 7px rgba(34,197,94,.75);
     }
 
-    /* ── Jiggler button ── */
-    .jig-btn {
-      width: 48px;
-      height: 44px;
-      margin-top: 6px;
-      background: linear-gradient(160deg, #1c1c35 0%, #141428 100%);
-      border: 1px solid rgba(99, 102, 241, 0.28);
-      border-right: none;
-      border-radius: 8px 0 0 8px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      cursor: pointer;
-      -webkit-app-region: no-drag;
-      user-select: none;
-      transition: background 0.15s;
-    }
-    .jig-btn:hover { background: linear-gradient(160deg, #222244 0%, #1a1a38 100%); }
-    .jig-btn:active { background: linear-gradient(160deg, #181830 0%, #111122 100%); }
+    /* ── REC (60 px) ── */
+    .rec { height: 60px; }
+    .rec.on { background: rgba(239,68,68,.05); }
+    .rec.on:hover { background: rgba(239,68,68,.09); }
 
-    .jig-icon {
-      color: #4f4f8f;
-      transition: color 0.15s, filter 0.15s;
+    .rec-dot {
+      width: 13px; height: 13px; border-radius: 50%;
+      background: #28184a;
+      transition: background .3s, box-shadow .3s;
+    }
+    .rec.on .rec-dot {
+      background: var(--red);
+      box-shadow: 0 0 10px rgba(239,68,68,.72);
+      animation: blink 1.15s ease-in-out infinite;
+    }
+
+    .rec-label {
+      font: 700 8.5px/1 'Segoe UI', system-ui, sans-serif;
+      letter-spacing: 1.5px; text-transform: uppercase;
+      color: var(--text-muted);
+      transition: color .3s;
+    }
+    .rec.on .rec-label { color: #f87171; letter-spacing: .5px; }
+
+    @keyframes blink { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.45;transform:scale(.78)} }
+
+    /* ── Jiggler (48 px) ── */
+    .jig { height: 48px; }
+
+    .jig-icon { color: var(--text-dim); transition: color .15s, filter .15s; }
+    .jig:hover .jig-icon { color: var(--indigo); }
+    .jig.on .jig-icon {
+      color: var(--amber);
+      filter: drop-shadow(0 0 5px rgba(245,158,11,.72));
+    }
+
+    /* ── Focus Time (58 px) ── */
+    .ft { height: 58px; }
+    .ft.on { background: rgba(34,197,94,.04); }
+
+    .ft-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #222240;
+      transition: background .4s, box-shadow .4s;
+    }
+    .ft-dot.on {
+      background: var(--green);
+      box-shadow: 0 0 6px rgba(34,197,94,.72);
+      animation: breathe 1.5s ease-in-out infinite;
+    }
+    @keyframes breathe { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+    .ft-label {
+      font: 700 9px/1 'Segoe UI', system-ui, sans-serif;
+      letter-spacing: .04em;
+      color: var(--text-dim);
+      transition: color .4s;
+    }
+    .ft.on .ft-label { color: #4ade80; }
+
+    /* ── Calendar (flex) ── */
+    .cal {
+      flex: 1;
+      justify-content: flex-start;
+      padding: 10px 0 8px;
+      gap: 5px;
+      overflow: hidden;
+    }
+
+    .cal-head {
+      font: 700 7px/1 'Segoe UI', system-ui, sans-serif;
+      letter-spacing: 3.5px; text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .cal-rule {
+      width: 22px; height: 1px;
+      background: var(--indigo-faint);
       flex-shrink: 0;
     }
-    .jig-btn:hover .jig-icon { color: #6366f1; }
-    .jig-btn.active .jig-icon {
-      color: #f59e0b;
-      filter: drop-shadow(0 0 5px rgba(245, 158, 11, 0.75));
+
+    .cal-list {
+      display: flex; flex-direction: column;
+      align-items: center; gap: 5px;
+      flex: 1; overflow: hidden;
+      width: 100%;
     }
 
-    /* ── Calendar strip (bottom) ── */
-    .cal-strip {
-      width: 48px;
-      height: 164px;
-      margin-top: 6px;
-      background: linear-gradient(160deg, #131325 0%, #0e0e20 100%);
-      border: 1px solid rgba(99, 102, 241, 0.22);
-      border-right: none;
-      border-top: 1px solid rgba(99, 102, 241, 0.15);
-      border-radius: 0 0 0 12px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding: 10px 0 10px;
-      gap: 6px;
-      overflow: hidden;
+    .ev {
+      display: flex; flex-direction: row;
+      align-items: center; justify-content: center;
+      gap: 5px; width: 100%; padding: 3px 6px;
+      border-radius: 5px;
+      transition: background .12s;
       cursor: pointer;
-      -webkit-app-region: no-drag;
-      user-select: none;
     }
-    .cal-strip:hover { background: linear-gradient(160deg, #181832 0%, #121228 100%); }
+    .ev:hover { background: rgba(99,102,241,.12); }
 
-    .cal-strip-label {
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: 7px; font-weight: 700; letter-spacing: .12em;
-      text-transform: uppercase; color: #3a3a6a;
-      writing-mode: vertical-rl; text-orientation: mixed;
-      flex: none;
+    .ev-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .ev-dot.now  { background: var(--indigo); box-shadow: 0 0 5px rgba(99,102,241,.8); animation: breathe 1.5s ease-in-out infinite; }
+    .ev-dot.soon { background: var(--amber); }
+    .ev-dot.later { background: #28284a; }
+
+    .ev-time {
+      font: 700 8.5px/1 'Segoe UI', system-ui, sans-serif;
+      color: var(--indigo); flex-shrink: 0;
     }
+    .ev-time.muted { color: var(--text-dim); }
+    .ev-time.now   { color: var(--indigo-lt); }
 
-    .cal-divider {
-      width: 24px; height: 1px;
-      background: rgba(99, 102, 241, 0.18);
-      flex: none;
-    }
-
-    .cal-items { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: 1; overflow: hidden; }
-
-    .cal-item {
-      display: flex; flex-direction: column; align-items: center;
-      gap: 3px; width: 100%; cursor: pointer;
-      padding: 4px 6px;
-      border-radius: 6px;
-      transition: background 0.12s;
-    }
-    .cal-item:hover { background: rgba(99,102,241,0.12); }
-
-    .cal-item-dot {
-      width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
-    }
-    .cal-item-dot.now  { background: #6366f1; box-shadow: 0 0 6px rgba(99,102,241,.8); animation: pulse-cal 1.4s ease-in-out infinite; }
-    .cal-item-dot.soon { background: #f59e0b; }
-    .cal-item-dot.later { background: #3a3a5a; }
-
-    @keyframes pulse-cal { 0%,100%{opacity:1} 50%{opacity:.35} }
-
-    .cal-item-time {
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: 9px; font-weight: 700; color: #6366f1;
-      writing-mode: vertical-rl; text-orientation: mixed;
-      letter-spacing: .03em; line-height: 1;
-    }
-    .cal-item-time.muted { color: #4a4a6a; }
-    .cal-item-time.now   { color: #818cf8; }
-
-    .cal-empty-msg {
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: 8px; color: #2e2e4e; font-weight: 600; letter-spacing: .06em;
-      writing-mode: vertical-rl; text-orientation: mixed;
+    .cal-empty {
+      font: 600 8px/1 'Segoe UI', system-ui, sans-serif;
+      color: var(--text-muted);
     }
   </style>
 </head>
 <body>
-  <div class="handle" id="handle" title="My Working Hub — click to open">
-    <svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none"
-         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="3" y="3" width="7" height="7" rx="1"/>
-      <rect x="14" y="3" width="7" height="7" rx="1"/>
-      <rect x="3" y="14" width="7" height="7" rx="1"/>
-      <rect x="14" y="14" width="7" height="7" rx="1"/>
-    </svg>
-    <span class="label">HUB</span>
-    <span class="focus-dot" id="focus-dot"></span>
-  </div>
+  <div class="shell">
 
-  <div class="jig-btn" id="jig-btn" title="Mouse Jiggler — keep screen awake">
-    <svg class="jig-icon" width="16" height="16" viewBox="0 0 24 24" fill="none"
-         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="6" y="2" width="12" height="18" rx="6"/>
-      <line x1="12" y1="7" x2="12" y2="11"/>
-    </svg>
-  </div>
-
-  <div class="cal-strip" id="cal-strip" title="Calendar — click to open">
-    <span class="cal-strip-label">CAL</span>
-    <div class="cal-divider"></div>
-    <div class="cal-items" id="cal-items">
-      <span class="cal-empty-msg">–</span>
+    <!-- HUB -->
+    <div class="sec hub" id="handle" title="My Working Hub — click to open">
+      <svg class="hub-icon" width="20" height="20" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="7" rx="1"/>
+        <rect x="14" y="3" width="7" height="7" rx="1"/>
+        <rect x="3" y="14" width="7" height="7" rx="1"/>
+        <rect x="14" y="14" width="7" height="7" rx="1"/>
+      </svg>
+      <span class="hub-label">HUB</span>
+      <span class="focus-dot" id="focus-dot"></span>
     </div>
+
+    <div class="divider"></div>
+
+    <!-- REC -->
+    <div class="sec rec" id="rec-btn" title="Start recording">
+      <span class="rec-dot"></span>
+      <span class="rec-label" id="rec-label">REC</span>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Jiggler -->
+    <div class="sec jig" id="jig-btn" title="Mouse Jiggler — keep screen awake">
+      <svg class="jig-icon" width="17" height="17" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="6" y="2" width="12" height="18" rx="6"/>
+        <line x1="12" y1="7" x2="12" y2="11"/>
+      </svg>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Focus Time -->
+    <div class="sec ft" id="ft-strip" title="Focus Time today — click to open">
+      <span class="ft-dot" id="ft-dot"></span>
+      <span class="ft-label" id="ft-time">–</span>
+    </div>
+
+    <div class="divider"></div>
+
+    <!-- Calendar -->
+    <div class="sec cal" id="cal-strip" title="Calendar — click to open">
+      <span class="cal-head">CAL</span>
+      <div class="cal-rule"></div>
+      <div class="cal-list" id="cal-list">
+        <span class="cal-empty">–</span>
+      </div>
+    </div>
+
   </div>
 
   <script>
     const PORT = 8765;
 
-    document.getElementById('handle').addEventListener('click', () => {
-      window.electronAPI.toggle();
+    // ── HUB ──
+    document.getElementById('handle').addEventListener('click', () => window.electronAPI.toggle());
+
+    // ── Recording ──
+    const recBtn   = document.getElementById('rec-btn');
+    const recLabel = document.getElementById('rec-label');
+    let recActive = false;
+    let recStart  = null;
+    let recTimer  = null;
+
+    function setRecState(active, startTime) {
+      recActive = active;
+      recStart  = startTime ? new Date(startTime) : null;
+      recBtn.classList.toggle('on', active);
+      recBtn.title = active ? 'Recording… click to stop' : 'Start recording';
+      clearInterval(recTimer);
+      recTimer = null;
+      if (!active) {
+        recLabel.textContent = 'REC';
+      } else {
+        recTimer = setInterval(tickRec, 1000);
+        tickRec();
+      }
+    }
+
+    function tickRec() {
+      if (!recStart) return;
+      const s = Math.floor((Date.now() - recStart.getTime()) / 1000);
+      const m = Math.floor(s / 60);
+      recLabel.textContent = m > 0 ? `${m}:${String(s % 60).padStart(2, '0')}` : `${s}s`;
+    }
+
+    recBtn.addEventListener('click', async () => {
+      try {
+        if (recActive) {
+          await fetch(`http://127.0.0.1:${PORT}/api/record/stop`, { method: 'POST' });
+          setRecState(false);
+        } else {
+          const res = await fetch(`http://127.0.0.1:${PORT}/api/record/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source: 'both', device_index: null }),
+          });
+          if (res.ok) setRecState(true, new Date().toISOString());
+        }
+      } catch {}
     });
 
-    document.getElementById('cal-strip').addEventListener('click', () => {
-      window.electronAPI.openPage('calendar');
-    });
+    async function syncRec() {
+      try {
+        const res  = await fetch(`http://127.0.0.1:${PORT}/api/recording/status`);
+        const data = await res.json();
+        setRecState(data.recording, data.recording_start);
+      } catch {}
+    }
+    setTimeout(syncRec, 2500);
+    setInterval(syncRec, 15_000);
 
     // ── Jiggler ──
     const jigBtn = document.getElementById('jig-btn');
-    let jigActive = false;
+    let jigOn = false;
 
-    function setJigState(active) {
-      jigActive = active;
-      jigBtn.classList.toggle('active', active);
-      jigBtn.title = active ? 'Mouse Jiggler — active (click to stop)' : 'Mouse Jiggler — keep screen awake';
+    function setJigState(on) {
+      jigOn = on;
+      jigBtn.classList.toggle('on', on);
+      jigBtn.title = on ? 'Jiggler active — click to stop' : 'Mouse Jiggler — keep screen awake';
     }
 
     jigBtn.addEventListener('click', async () => {
       try {
-        const endpoint = jigActive ? 'stop' : 'start';
-        await fetch(`http://127.0.0.1:${PORT}/api/jiggler/${endpoint}`, { method: 'POST' });
-        setJigState(!jigActive);
+        await fetch(`http://127.0.0.1:${PORT}/api/jiggler/${jigOn ? 'stop' : 'start'}`, { method: 'POST' });
+        setJigState(!jigOn);
       } catch {}
     });
 
-    // Poll status so auto-stop (from keyboard/mouse) reflects in the button
     setInterval(async () => {
-      if (!jigActive) return;
+      if (!jigOn) return;
       try {
-        const res = await fetch(`http://127.0.0.1:${PORT}/api/jiggler/status`);
-        const data = await res.json();
-        if (!data.running) setJigState(false);
+        const d = await (await fetch(`http://127.0.0.1:${PORT}/api/jiggler/status`)).json();
+        if (!d.running) setJigState(false);
       } catch {}
     }, 5000);
 
-    async function syncJiggler() {
+    setTimeout(async () => {
       try {
-        const res = await fetch(`http://127.0.0.1:${PORT}/api/jiggler/status`);
-        const data = await res.json();
-        setJigState(data.running);
+        const d = await (await fetch(`http://127.0.0.1:${PORT}/api/jiggler/status`)).json();
+        setJigState(d.running);
       } catch {}
-    }
-    setTimeout(syncJiggler, 2500);
+    }, 2500);
 
+    // ── Focus dot (IPC) ──
     const focusDot = document.getElementById('focus-dot');
-
     window.electronAPI.onFocusState((active) => {
       focusDot.classList.toggle('active', active);
+      syncFT();
     });
 
-    // Fallback: poll the server directly so the dot is always correct
-    // even if the IPC message was missed on startup.
-    async function syncFocusDot() {
+    setTimeout(async () => {
       try {
-        const res = await fetch(`http://127.0.0.1:${PORT}/api/work-sessions/current`);
-        const sess = await res.json();
-        focusDot.classList.toggle('active', sess !== null);
+        const s = await (await fetch(`http://127.0.0.1:${PORT}/api/work-sessions/current`)).json();
+        focusDot.classList.toggle('active', s !== null);
+      } catch {}
+    }, 2500);
+    setInterval(async () => {
+      try {
+        const s = await (await fetch(`http://127.0.0.1:${PORT}/api/work-sessions/current`)).json();
+        focusDot.classList.toggle('active', s !== null);
+      } catch {}
+    }, 30_000);
+
+    // ── Focus Time strip ──
+    document.getElementById('ft-strip').addEventListener('click', () => window.electronAPI.openPage('focustime'));
+
+    function fmtFocus(s) {
+      if (s < 60) return '<1m';
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+      return h ? `${h}h${m ? m + 'm' : ''}` : `${m}m`;
+    }
+
+    async function syncFT() {
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const [sR, cR] = await Promise.all([
+          fetch(`http://127.0.0.1:${PORT}/api/work-sessions?date=${today}`),
+          fetch(`http://127.0.0.1:${PORT}/api/work-sessions/current`),
+        ]);
+        const sessions = await sR.json();
+        const cur      = await cR.json();
+        const doneSecs = sessions.filter(s => s.duration_seconds != null)
+                                 .reduce((a, s) => a + s.duration_seconds, 0);
+        const activeMs   = cur?.start_time ? new Date(cur.start_time).getTime() : null;
+        const activeSecs = activeMs ? Math.floor((Date.now() - activeMs) / 1000) : 0;
+        const total      = doneSecs + activeSecs;
+        const isOn       = activeMs !== null;
+        document.getElementById('ft-strip').classList.toggle('on', isOn);
+        document.getElementById('ft-dot').classList.toggle('on', isOn);
+        document.getElementById('ft-time').textContent = total > 0 ? fmtFocus(total) : '–';
       } catch {}
     }
-    setTimeout(syncFocusDot, 2500);
-    setInterval(syncFocusDot, 30_000);
+    setTimeout(syncFT, 3000);
+    setInterval(syncFT, 30_000);
 
-    function fmtTime(iso) {
-      const d = new Date(iso);
-      return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+    // ── Calendar ──
+    document.getElementById('cal-strip').addEventListener('click', () => window.electronAPI.openPage('calendar'));
+
+    function hhmm(iso) {
+      return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
     }
 
     function renderEvents(events) {
-      const container = document.getElementById('cal-items');
-      const now = new Date();
-
-      // Keep only events not more than 10 min in the past, max 3
-      const relevant = events
+      const list = document.getElementById('cal-list');
+      const now  = new Date();
+      const rows = events
         .filter(ev => new Date(ev.end) > new Date(now - 10 * 60 * 1000))
         .slice(0, 3);
-
-      if (!relevant.length) {
-        container.innerHTML = '<span class="cal-empty-msg">clear</span>';
-        return;
-      }
-
-      container.innerHTML = '';
-      relevant.forEach(ev => {
-        const start = new Date(ev.start);
-        const end   = new Date(ev.end);
+      if (!rows.length) { list.innerHTML = '<span class="cal-empty">clear</span>'; return; }
+      list.innerHTML = '';
+      rows.forEach(ev => {
+        const start = new Date(ev.start), end = new Date(ev.end);
         const isNow  = now >= start && now < end;
-        const isSoon = !isNow && (start - now) < 30 * 60 * 1000 && start > now;
+        const isSoon = !isNow && start > now && (start - now) < 30 * 60 * 1000;
 
-        const item = document.createElement('div');
-        item.className = 'cal-item';
-        item.title = ev.subject;
+        const el   = document.createElement('div');
+        el.className = 'ev';
+        el.title     = ev.subject;
 
-        const dot = document.createElement('span');
-        dot.className = 'cal-item-dot ' + (isNow ? 'now' : isSoon ? 'soon' : 'later');
+        const dot  = document.createElement('span');
+        dot.className = 'ev-dot ' + (isNow ? 'now' : isSoon ? 'soon' : 'later');
 
         const time = document.createElement('span');
-        time.className = 'cal-item-time ' + (isNow ? 'now' : isSoon ? '' : 'muted');
-        time.textContent = isNow ? 'NOW' : fmtTime(ev.start);
+        time.className  = 'ev-time ' + (isNow ? 'now' : isSoon ? '' : 'muted');
+        time.textContent = isNow ? 'NOW' : hhmm(ev.start);
 
-        item.appendChild(dot);
-        item.appendChild(time);
-        container.appendChild(item);
+        el.appendChild(dot);
+        el.appendChild(time);
+        list.appendChild(el);
       });
     }
 
-    async function fetchEvents() {
+    async function fetchCal() {
       try {
-        const res  = await fetch(`http://127.0.0.1:${PORT}/api/calendar/events?days=0`);
-        const data = await res.json();
-        if (data.ok) renderEvents(data.events || []);
-      } catch {
-        // server not ready yet — silently ignore
-      }
+        const d = await (await fetch(`http://127.0.0.1:${PORT}/api/calendar/events?days=0`)).json();
+        if (d.ok) renderEvents(d.events || []);
+      } catch {}
     }
-
-    // First fetch after server warmup, then every minute to keep NOW/SOON state fresh
-    setTimeout(fetchEvents, 3000);
-    setInterval(fetchEvents, 60 * 1000);
+    setTimeout(fetchCal, 3000);
+    setInterval(fetchCal, 60_000);
   </script>
 </body>
 </html>

@@ -4,10 +4,10 @@ const path = require('path');
 const http = require('http');
 
 const TAB_W   = 48;
-const TAB_H   = 316;
+const TAB_H   = 390;
 const PORT    = 8765;
 const ANIM_MS = 220;
-const PANEL_W = 780;
+const PANEL_W = 920;
 
 let tabWin      = null;
 let appWin      = null;
@@ -196,5 +196,17 @@ app.whenReady().then(async () => {
   createAppWin();
 });
 
-app.on('will-quit',         () => python?.kill());
-app.on('window-all-closed', () => { python?.kill(); app.quit(); });
+let _quitting = false;
+
+app.on('before-quit', (e) => {
+  if (_quitting) return;
+  e.preventDefault();
+  _quitting = true;
+  // Ask Python to flush any active recording before we hard-kill it.
+  // If the server is already gone, fetch() rejects immediately — that's fine.
+  fetch(`http://127.0.0.1:${PORT}/api/shutdown`, { method: 'POST' })
+    .catch(() => {})
+    .finally(() => { python?.kill(); app.quit(); });
+});
+
+app.on('window-all-closed', () => app.quit());
