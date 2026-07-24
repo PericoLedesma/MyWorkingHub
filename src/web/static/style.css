@@ -251,7 +251,7 @@ body:has(#record-btn.recording) #timer { color: var(--red); }
 /* VU meter */
 .vu-wrap { display: flex; flex-direction: column; gap: 8px; }
 .vu-row { display: flex; align-items: center; gap: 10px; }
-.vu-row canvas { flex: 1; min-width: 0; }
+.vu-row canvas { flex: 1; width: 0; display: block; }
 .vu-label { font-size: 10px; color: var(--muted); width: 26px; text-align: right; letter-spacing: .05em; font-weight: 600; }
 
 /* ── History timeline bar ── */

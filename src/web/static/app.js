@@ -23,6 +23,7 @@ const S = {
   nextProject:     '',       // project to apply when recording stops
   nextMeeting:     '',       // meeting to apply when recording stops
   calEvents:       [],       // today's calendar events (cached)
+  projects:        [],       // project entities from /api/projects (for color lookup)
 };
 
 // ── Page navigation ───────────────────────────────────────────────────────────
@@ -33,6 +34,7 @@ function showPage(name) {
   document.querySelectorAll('.nav-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.page === name);
   });
+  if (name === 'recordings') initVuMeter();
   if (name === 'history') renderHistoryBar();
   if (name === 'focustime') { ftShowTab('today'); ftLoadSessions(); }
   else {
@@ -154,7 +156,7 @@ const PROJECT_PALETTE = [
 ];
 function projectColor(name) {
   if (!name) return null;
-  const proj = S.projects.find(p => p.name === name);
+  const proj = Array.isArray(S.projects) && S.projects.find(p => p.name === name);
   if (proj && proj.color) return proj.color;
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
@@ -373,25 +375,42 @@ function updateRecordButton() {
 }
 
 async function toggleRecord() {
-  if (S.recording) {
-    await api('POST', '/api/record/stop');
-  } else {
-    const sel = document.getElementById('device-select');
-    const deviceIndex = sel.value !== '' ? parseInt(sel.value) : null;
-    S.nextProject = document.getElementById('new-project').value.trim();
-    S.nextMeeting = document.getElementById('new-meeting').value.trim();
-    // Auto-link to a currently-active Outlook meeting if the user left the field blank
-    if (!S.nextMeeting && S.calEvents.length) {
-      const now = new Date();
-      const active = S.calEvents.find(e => new Date(e.start) <= now && now < new Date(e.end));
-      if (active) S.nextMeeting = active.subject;
+  const btn = document.getElementById('record-btn');
+  if (btn) btn.disabled = true;
+
+  try {
+    if (S.recording) {
+      await api('POST', '/api/record/stop');
+    } else {
+      const sel = document.getElementById('device-select');
+      const deviceIndex = sel.value !== '' ? parseInt(sel.value) : null;
+      S.nextProject = document.getElementById('new-project').value.trim();
+      S.nextMeeting = document.getElementById('new-meeting').value.trim();
+      // Auto-link to a currently-active Outlook meeting if the user left the field blank
+      if (!S.nextMeeting && S.calEvents.length) {
+        const now = new Date();
+        const active = S.calEvents.find(e => new Date(e.start) <= now && now < new Date(e.end));
+        if (active) S.nextMeeting = active.subject;
+      }
+      document.getElementById('new-project').value = '';
+      document.getElementById('new-meeting').value = '';
+      const result = await api('POST', '/api/record/start', {
+        source: S.source,
+        device_index: deviceIndex,
+      });
+      if (result?.ok) {
+        S.recording = true;
+        S.recordingStart = Date.now() / 1000;
+        updateRecordButton();
+        startTimer();
+        clearLiveTranscript();
+        document.getElementById('live-transcript-panel').style.display = '';
+      }
     }
-    document.getElementById('new-project').value = '';
-    document.getElementById('new-meeting').value = '';
-    await api('POST', '/api/record/start', {
-      source: S.source,
-      device_index: deviceIndex,
-    });
+  } catch (e) {
+    console.error('toggleRecord error:', e);
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -440,21 +459,20 @@ function appendLiveTranscript(timestamp, text, speaker) {
 }
 
 // ── VU meter ──────────────────────────────────────────────────────────────────
+let _vuStarted = false;
 function initVuMeter() {
+  if (_vuStarted) return;
+  _vuStarted = true;
   const micCanvas = document.getElementById('vu-mic');
   const appCanvas = document.getElementById('vu-app');
+  micCanvas.width = micCanvas.offsetWidth || 420;
+  appCanvas.width = appCanvas.offsetWidth || 420;
   const micCtx = micCanvas.getContext('2d');
   const appCtx = appCanvas.getContext('2d');
 
-  function syncSize(canvas) {
-    const w = canvas.offsetWidth;
-    if (w > 0 && canvas.width !== w) canvas.width = w;
-  }
-
   function drawBar(ctx, canvas, level) {
-    syncSize(canvas);
     const W = canvas.width, H = canvas.height;
-    ctx.fillStyle = '#3f3f46';
+    ctx.fillStyle = '#27272a';
     ctx.fillRect(0, 0, W, H);
     const w = Math.floor(W * Math.min(level, 1));
     if (w > 0) {
@@ -1749,7 +1767,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   homeInit();
   connectWS();
   connectChatWS();
-  initVuMeter();
   initFocusTime();
   window.electronAPI?.onNavigate?.(name => showPage(name));
 });

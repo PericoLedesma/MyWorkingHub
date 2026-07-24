@@ -362,8 +362,7 @@ def load_metadata(folder: str) -> list[dict]:
                 folder_wavs[f] = os.path.join(root, f)
 
     log.debug("load_metadata  folder=%s  rows_in_db=%d", folder, len(rows))
-    path_updates: list[tuple[str, int]] = []        # (new_fp, row_id)
-    duration_updates: list[tuple[float, int]] = []  # (actual_dur, row_id)
+    path_updates: list[tuple[str, int]] = []  # (new_fp, row_id)
     known: set[str] = set()
     recs = []
     missing_count = 0
@@ -380,23 +379,6 @@ def load_metadata(folder: str) -> list[dict]:
             else:
                 file_missing = True
                 missing_count += 1
-
-        if not file_missing:
-            # Verify stored duration matches the actual WAV file.
-            # The "both" source bug used to truncate the WAV to loopback length while
-            # the DB stored wall-clock time — this corrects those stale rows.
-            try:
-                import soundfile as sf
-                actual_dur = sf.info(fp).duration
-                if abs(actual_dur - dur) > 1.0:
-                    log.warning(
-                        "duration mismatch id=%d stored=%.1fs actual=%.1fs — correcting",
-                        row_id, dur, actual_dur,
-                    )
-                    duration_updates.append((actual_dur, row_id))
-                    dur = actual_dur
-            except Exception:
-                pass
 
         recs.append({
             "id": row_id,
@@ -425,13 +407,6 @@ def load_metadata(folder: str) -> list[dict]:
         with sqlite3.connect(DB_PATH) as conn:
             conn.executemany(
                 "UPDATE recordings SET filepath = ? WHERE id = ?", path_updates
-            )
-
-    if duration_updates:
-        log.info("Corrected duration for %d recording(s)", len(duration_updates))
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.executemany(
-                "UPDATE recordings SET duration = ? WHERE id = ?", duration_updates
             )
 
     if missing_count:
