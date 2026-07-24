@@ -446,9 +446,15 @@ function initVuMeter() {
   const micCtx = micCanvas.getContext('2d');
   const appCtx = appCanvas.getContext('2d');
 
+  function syncSize(canvas) {
+    const w = canvas.offsetWidth;
+    if (w > 0 && canvas.width !== w) canvas.width = w;
+  }
+
   function drawBar(ctx, canvas, level) {
+    syncSize(canvas);
     const W = canvas.width, H = canvas.height;
-    ctx.fillStyle = '#27272a';
+    ctx.fillStyle = '#3f3f46';
     ctx.fillRect(0, 0, W, H);
     const w = Math.floor(W * Math.min(level, 1));
     if (w > 0) {
@@ -1156,13 +1162,13 @@ async function ftCheckIdle() {
     }
     window.electronAPI?.setFocusState(false);
     await ftLoadSessions();
-  } else if (!isIdle && !FT.active) {
+  } else if (!isIdle && (!FT.active || !FT.sessionStartMs)) {
     FT.active = true;
     try {
       const sess = await api('POST', '/api/work-sessions');
       FT.sessionId = sess.id;
       FT.sessionStartMs = new Date(sess.start_time).getTime();
-    } catch (e) {}
+    } catch (e) { FT.active = false; }
     window.electronAPI?.setFocusState(true);
   }
 }
