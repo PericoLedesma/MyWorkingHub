@@ -41,6 +41,10 @@ focus_session_start: str | None = None
 # Each entry: (timestamp, text, speaker)
 live_segments: list[tuple[str, str, str]] = []
 
+# True when the Electron panel is expanded (or when running without Electron).
+# The audio monitor only runs while this is True — keeps idle CPU near zero.
+panel_visible: bool = True
+
 
 def init(event_loop: asyncio.AbstractEventLoop) -> None:
     """Call once at FastAPI startup to wire up the event loop."""

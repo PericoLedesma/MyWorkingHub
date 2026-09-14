@@ -7,7 +7,7 @@
 
     html, body {
       width: 48px;
-      height: 390px;
+      height: 260px;
       overflow: hidden;
       background: transparent;
     }
@@ -30,7 +30,7 @@
     /* ── Single outer shell ── */
     .shell {
       width: 48px;
-      height: 390px;
+      height: 260px;
       display: flex;
       flex-direction: column;
       background: linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
@@ -147,60 +147,6 @@
     }
     .ft.on .ft-label { color: #4ade80; }
 
-    /* ── Calendar (flex) ── */
-    .cal {
-      flex: 1;
-      justify-content: flex-start;
-      padding: 10px 0 8px;
-      gap: 5px;
-      overflow: hidden;
-    }
-
-    .cal-head {
-      font: 700 7px/1 'Segoe UI', system-ui, sans-serif;
-      letter-spacing: 3.5px; text-transform: uppercase;
-      color: var(--text-muted);
-    }
-
-    .cal-rule {
-      width: 22px; height: 1px;
-      background: var(--indigo-faint);
-      flex-shrink: 0;
-    }
-
-    .cal-list {
-      display: flex; flex-direction: column;
-      align-items: center; gap: 5px;
-      flex: 1; overflow: hidden;
-      width: 100%;
-    }
-
-    .ev {
-      display: flex; flex-direction: row;
-      align-items: center; justify-content: center;
-      gap: 5px; width: 100%; padding: 3px 6px;
-      border-radius: 5px;
-      transition: background .12s;
-      cursor: pointer;
-    }
-    .ev:hover { background: rgba(99,102,241,.12); }
-
-    .ev-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-    .ev-dot.now  { background: var(--indigo); box-shadow: 0 0 5px rgba(99,102,241,.8); animation: breathe 1.5s ease-in-out infinite; }
-    .ev-dot.soon { background: var(--amber); }
-    .ev-dot.later { background: #28284a; }
-
-    .ev-time {
-      font: 700 8.5px/1 'Segoe UI', system-ui, sans-serif;
-      color: var(--indigo); flex-shrink: 0;
-    }
-    .ev-time.muted { color: var(--text-dim); }
-    .ev-time.now   { color: var(--indigo-lt); }
-
-    .cal-empty {
-      font: 600 8px/1 'Segoe UI', system-ui, sans-serif;
-      color: var(--text-muted);
-    }
   </style>
 </head>
 <body>
@@ -244,17 +190,6 @@
     <div class="sec ft" id="ft-strip" title="Focus Time today — click to open">
       <span class="ft-dot" id="ft-dot"></span>
       <span class="ft-label" id="ft-time">–</span>
-    </div>
-
-    <div class="divider"></div>
-
-    <!-- Calendar -->
-    <div class="sec cal" id="cal-strip" title="Calendar — click to open">
-      <span class="cal-head">CAL</span>
-      <div class="cal-rule"></div>
-      <div class="cal-list" id="cal-list">
-        <span class="cal-empty">–</span>
-      </div>
     </div>
 
   </div>
@@ -315,7 +250,9 @@
         const res  = await fetch(`http://127.0.0.1:${PORT}/api/recording/status`);
         const data = await res.json();
         setRecState(data.recording, data.recording_start);
-      } catch {}
+      } catch {
+        setRecState(false);
+      }
     }
     setTimeout(syncRec, 2500);
     setInterval(syncRec, 15_000);
@@ -363,13 +300,17 @@
       try {
         const s = await (await fetch(`http://127.0.0.1:${PORT}/api/work-sessions/current`)).json();
         focusDot.classList.toggle('active', s !== null);
-      } catch {}
+      } catch {
+        focusDot.classList.remove('active');
+      }
     }, 2500);
     setInterval(async () => {
       try {
         const s = await (await fetch(`http://127.0.0.1:${PORT}/api/work-sessions/current`)).json();
         focusDot.classList.toggle('active', s !== null);
-      } catch {}
+      } catch {
+        focusDot.classList.remove('active');
+      }
     }, 30_000);
 
     // ── Focus Time strip ──
@@ -382,6 +323,9 @@
     }
 
     async function syncFT() {
+      const strip = document.getElementById('ft-strip');
+      const dot   = document.getElementById('ft-dot');
+      const lbl   = document.getElementById('ft-time');
       try {
         const today = new Date().toISOString().slice(0, 10);
         const [sR, cR] = await Promise.all([
@@ -396,59 +340,19 @@
         const activeSecs = activeMs ? Math.floor((Date.now() - activeMs) / 1000) : 0;
         const total      = doneSecs + activeSecs;
         const isOn       = activeMs !== null;
-        document.getElementById('ft-strip').classList.toggle('on', isOn);
-        document.getElementById('ft-dot').classList.toggle('on', isOn);
-        document.getElementById('ft-time').textContent = total > 0 ? fmtFocus(total) : '–';
-      } catch {}
+        strip.classList.toggle('on', isOn);
+        dot.classList.toggle('on', isOn);
+        lbl.textContent = total > 0 ? fmtFocus(total) : '–';
+      } catch {
+        strip.classList.remove('on');
+        dot.classList.remove('on');
+        lbl.textContent = '–';
+        focusDot.classList.remove('active');
+      }
     }
     setTimeout(syncFT, 3000);
     setInterval(syncFT, 30_000);
 
-    // ── Calendar ──
-    document.getElementById('cal-strip').addEventListener('click', () => window.electronAPI.openPage('calendar'));
-
-    function hhmm(iso) {
-      return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
-    }
-
-    function renderEvents(events) {
-      const list = document.getElementById('cal-list');
-      const now  = new Date();
-      const rows = events
-        .filter(ev => new Date(ev.end) > new Date(now - 10 * 60 * 1000))
-        .slice(0, 3);
-      if (!rows.length) { list.innerHTML = '<span class="cal-empty">clear</span>'; return; }
-      list.innerHTML = '';
-      rows.forEach(ev => {
-        const start = new Date(ev.start), end = new Date(ev.end);
-        const isNow  = now >= start && now < end;
-        const isSoon = !isNow && start > now && (start - now) < 30 * 60 * 1000;
-
-        const el   = document.createElement('div');
-        el.className = 'ev';
-        el.title     = ev.subject;
-
-        const dot  = document.createElement('span');
-        dot.className = 'ev-dot ' + (isNow ? 'now' : isSoon ? 'soon' : 'later');
-
-        const time = document.createElement('span');
-        time.className  = 'ev-time ' + (isNow ? 'now' : isSoon ? '' : 'muted');
-        time.textContent = isNow ? 'NOW' : hhmm(ev.start);
-
-        el.appendChild(dot);
-        el.appendChild(time);
-        list.appendChild(el);
-      });
-    }
-
-    async function fetchCal() {
-      try {
-        const d = await (await fetch(`http://127.0.0.1:${PORT}/api/calendar/events?days=0`)).json();
-        if (d.ok) renderEvents(d.events || []);
-      } catch {}
-    }
-    setTimeout(fetchCal, 3000);
-    setInterval(fetchCal, 60_000);
   </script>
 </body>
 </html>

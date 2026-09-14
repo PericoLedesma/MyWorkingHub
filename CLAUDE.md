@@ -12,7 +12,7 @@
 
 4. **Graceful shutdown must flush the recording.** Electron calls `POST /api/shutdown` before hard-killing Python. That endpoint stops the recording and awaits `state.recording_thread.join(timeout=30)` before returning. The lifespan teardown does the same on SIGTERM. The WAV file and DB row must be on disk before the process exits.
 
-5. **`save_metadata` uses `INSERT OR IGNORE`.** Re-importing the same filepath is a no-op; the existing DB row is returned. Schema migrations are additive (`ALTER TABLE ADD COLUMN` only). Current schema version: **10**.
+5. **`save_metadata` uses `INSERT OR IGNORE`.** Re-importing the same filepath is a no-op; the existing DB row is returned. Schema migrations are additive (`ALTER TABLE ADD COLUMN` only). Current schema version: **11**.
 
 6. **`_stop_monitor()` must join the monitor thread before returning.** The monitor holds open WASAPI loopback stream handles. If recording starts before those handles are released, Windows gives the new stream a dead endpoint — the app audio bar goes silent during recording even though the monitor showed audio fine. `_stop_monitor()` sets the stop event AND calls `state.monitor_thread.join(timeout=2)`. Never remove the join or make `_stop_monitor` fire-and-forget.
 
@@ -72,7 +72,7 @@ Two SQLite databases in `SMART_RECORDER_DATA_DIR`:
 - `smart_recorder.db` — recordings, transcripts, notes, tags, projects
 - `focus_time.db` — Focus Time work sessions
 
-WAV files live in a `recordings/` subfolder alongside the databases. Schema migrations are additive (`ALTER TABLE ADD COLUMN`, never destructive). Current schema version: **10**.
+WAV files live in a `recordings/` subfolder alongside the databases. Schema migrations are additive (`ALTER TABLE ADD COLUMN`, never destructive). Current schema version: **11**.
 
 ---
 
@@ -93,6 +93,15 @@ main.py → uvicorn → FastAPI on :8765
   src/web/static/         SPA — index.html, app.js, style.css (no bundler)
   src/db.py               SQLite layer — recordings + projects schema + migrations
 ```
+
+**Recording card UI (History page — `app.js` `renderCard` / `buildDetailHTML`):**
+
+- Cards are centered and capped at `max-width: 780px` via `#rec-list > *`.
+- Footer layout: **Transcribe** (primary/indigo when no transcript, with mic SVG icon) on the left; folder icon + trash icon + **Details ▾** pill on the right, separated by a thin vertical rule.
+- Delete button is muted by default; turns red on hover only.
+- Personal notes textarea is **not** in the collapsed card — it lives in the expanded detail panel.
+- Expanded detail panel has **3 tabs in this order**: Notes (default) → Transcript → Speakers.
+- AI notes generation has been **removed from the History UI**. Notes stored in the DB are not surfaced on the card; generation can only be triggered via the API or MCP (`POST /api/recordings/{rid}/generate-notes`).
 
 **WebSocket `/ws/app`** — real-time event bus from Python to the SPA:
 
@@ -284,6 +293,24 @@ src/outlook.py   COM integration — get_events(days_ahead)
 
 ---
 
+## Service: Outlook Email
+
+Reads inbox emails from Outlook via COM. Requires desktop Outlook installed; app must be running.
+
+**Source files:**
+```
+src/outlook.py   COM integration — get_emails(count, unread_only)
+```
+
+**MCP tools** (`mcp/outlook_server.py`):
+
+| Tool | Status | Description |
+|---|---|---|
+| `get_emails` | Exists | Most recent inbox emails; `count` param (default 20), newest first |
+| `get_unread_emails` | Exists | Unread inbox emails only; `count` param (default 20), newest first |
+
+---
+
 ## Service: Notes (OneNote)
 
 Pushes recording summaries/notes to OneNote as pages via COM. Requires desktop OneNote installed; app must be running.
@@ -348,7 +375,7 @@ Reads Teams data via Graph API. Auth uses **Windows WAM broker** (Web Account Ma
 **Source files:**
 ```
 src/teams.py          Graph API calls + WAM auth + token cache
-mcp/teams_server.py   Thin FastMCP wrapper (same pattern as calendar_server.py)
+mcp/teams_server.py   Thin FastMCP wrapper (same pattern as outlook_server.py)
 ```
 
 **MCP tools** (`mcp/teams_server.py`):
@@ -383,9 +410,41 @@ The chat agent has one tool: `buscar_grabaciones` — full-text search over the 
 
 ---
 
+## Service: Diario
+
+Daily agenda (Home page) persisted in `smart_recorder.db`. Each calendar day has one row storing the complete sections/items JSON blob.
+
+**Source files:**
+```
+src/db.py               get_diario, save_diario
+src/web/server.py       GET/PUT /api/diario endpoints
+mcp/diario_server.py    MCP server (reads DB directly, no app needed)
+src/web/static/app.js   dLoadState/dPersist (async, API-backed)
+```
+
+**REST API endpoints:**
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/diario` | Return today's agenda state (or null if no row yet) |
+| `PUT` | `/api/diario` | Upsert today's agenda state `{state: {...}}` |
+
+**MCP tools** (`mcp/diario_server.py`):
+
+| Tool | Description |
+|---|---|
+| `get_diario(date="")` | Full agenda for a date (default: today). Returns sections + items. |
+| `add_item(section_id, text, priority=False)` | Add a todo to a section for today. |
+| `complete_item(section_id, item_id, done=True)` | Toggle an item's done state. |
+| `delete_item(section_id, item_id)` | Remove an item from today. |
+| `add_section(emoji, name)` | Add a new section to today. |
+| `delete_section(section_id)` | Remove a section (and all its items) from today. |
+
+---
+
 ## MCP Registration (Claude Desktop)
 
-Each service is a separate MCP server. Add all seven to `claude_desktop_config.json`. Note: Jiggler has no MCP server (UI-only feature).
+Each service is a separate MCP server. Add all eight to `claude_desktop_config.json`. Note: Jiggler has no MCP server (UI-only feature).
 
 **Config file location:**
 ```
@@ -410,6 +469,10 @@ Each service is a separate MCP server. Add all seven to `claude_desktop_config.j
     "hub-calendar": {
       "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
       "args": ["C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\mcp\\calendar_server.py"]
+    },
+    "hub-outlook": {
+      "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\mcp\\outlook_server.py"]
     },
     "hub-onenote": {
       "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",

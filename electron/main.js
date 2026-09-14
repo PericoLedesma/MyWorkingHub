@@ -1,10 +1,10 @@
-const { app, BrowserWindow, screen, ipcMain, Menu, session } = require('electron');
+const { app, BrowserWindow, screen, ipcMain, Menu, session, Notification } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const http = require('http');
 
 const TAB_W   = 48;
-const TAB_H   = 390;
+const TAB_H   = 260;
 const PORT    = 8765;
 const ANIM_MS = 220;
 const PANEL_W = 920;
@@ -140,9 +140,15 @@ function animateWidth(win, targetWidth, onDone) {
 // Expand / collapse / resize
 // ---------------------------------------------------------------------------
 
+function notifyDisplay(visible) {
+  const path = visible ? '/api/display/visible' : '/api/display/hidden';
+  fetch(`http://127.0.0.1:${PORT}${path}`, { method: 'POST' }).catch(() => {});
+}
+
 function expand() {
   if (expanded || animating) return;
   expanded = true;
+  notifyDisplay(true);
   const { workRight, top, height } = getLayout();
   // Start at 1 px wide at the right edge, then grow left — never off-screen
   appWin.setBounds({ x: workRight - TAB_W - 1, y: top, width: 1, height });
@@ -154,6 +160,7 @@ function expand() {
 function collapse() {
   if (!expanded || animating) return;
   expanded = false;
+  notifyDisplay(false);
   // Shrink to 1 px, then hide — right edge stays within primary display
   animateWidth(appWin, 1, () => {
     appWin.setIgnoreMouseEvents(true);
@@ -179,6 +186,9 @@ ipcMain.on('open-page', (_event, name) => {
   appWin?.webContents.send('navigate', name);
   if (!expanded) expand();
 });
+ipcMain.on('show-notification', (_event, { title, body }) => {
+  if (Notification.isSupported()) new Notification({ title, body }).show();
+});
 
 // ---------------------------------------------------------------------------
 // App lifecycle
@@ -192,6 +202,9 @@ app.whenReady().then(async () => {
   startPython();
   try { await waitForServer(); }
   catch (e) { console.error(e.message); }
+  // Panel starts collapsed — stop the Python monitor immediately so it doesn't
+  // burn CPU on WASAPI streams while nobody is watching the VU meters.
+  notifyDisplay(false);
   createTabWin();
   createAppWin();
 });

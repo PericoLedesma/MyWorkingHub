@@ -108,9 +108,17 @@ def list_mcp_services() -> str:
         },
         "calendar_server.py": {
             "server_name": "hub-calendar",
-            "description": "Read upcoming meetings from Outlook via COM (no app needed).",
+            "description": "Read Outlook calendar events via COM (no app needed).",
             "tools": [
                 "get_calendar_events — upcoming Outlook meetings; days param controls look-ahead",
+            ],
+        },
+        "outlook_server.py": {
+            "server_name": "hub-outlook",
+            "description": "Read Outlook inbox emails via COM (no app needed).",
+            "tools": [
+                "get_emails — most recent inbox emails; count param (default 20), newest first",
+                "get_unread_emails — unread inbox emails only; count param (default 20), newest first",
             ],
         },
         "onenote_server.py": {
@@ -131,10 +139,27 @@ def list_mcp_services() -> str:
         },
         "teams_server.py": {
             "server_name": "hub-teams",
-            "description": "Microsoft Teams via Graph API — MSAL device-code auth, token cached locally.",
+            "description": "Microsoft Teams via Graph API — WAM broker auth (silent after first consent), token cached locally.",
             "tools": [
                 "teams_whoami — confirm Graph auth; returns display name + email",
-                "teams_list_chats — list 5 most recent Teams chats",
+                "teams_list_chats — list recent chats with topic and last-message preview",
+                "teams_get_messages — read messages from a specific chat by chat ID",
+                "teams_list_teams — list all joined Teams",
+                "teams_list_channels — list channels in a Team by team ID",
+                "teams_get_presence — current availability / activity status",
+                "teams_send_message — send a message to a chat by chat ID",
+            ],
+        },
+        "diario_server.py": {
+            "server_name": "hub-diario",
+            "description": "Daily agenda (Home page) — read and mutate today's sections and todo items (reads smart_recorder.db).",
+            "tools": [
+                "get_diario — full agenda for a date (default: today); returns sections + items",
+                "add_item — add a todo item to a section for today",
+                "complete_item — toggle an item's done state",
+                "delete_item — remove an item from today's agenda",
+                "add_section — add a new section to today's agenda",
+                "delete_section — remove a section and all its items from today",
             ],
         },
         "hub_server.py": {

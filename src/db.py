@@ -17,7 +17,7 @@ def _txt_path(wav_path: str) -> str:
     return os.path.splitext(wav_path)[0] + ".txt"
 
 
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 
 
 def _init():
@@ -140,6 +140,16 @@ def _init():
                 pass
             conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
 
+        if db_version < 11:
+            log.info("Migrating schema to v11 (diario table)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS diario (
+                    date  TEXT PRIMARY KEY,
+                    state TEXT NOT NULL
+                )
+            """)
+            conn.execute("UPDATE schema_version SET version = ?", (_SCHEMA_VERSION,))
+
         # Migrate any existing .txt sidecar files into the DB
         rows = conn.execute(
             "SELECT filepath FROM recordings WHERE transcript IS NULL"
@@ -172,6 +182,16 @@ def update_tag(recording_id: int, field: str, value: str) -> None:
             f"UPDATE recordings SET {field} = ? WHERE id = ?",
             (value or None, recording_id),
         )
+
+
+def rename_project(old_name: str, new_name: str) -> int:
+    """Rename a project across all recordings. Returns number of rows updated."""
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            "UPDATE recordings SET project = ? WHERE project = ?",
+            (new_name or None, old_name),
+        )
+        return cur.rowcount
 
 
 def save_transcript(recording_id: int, text: str) -> None:
@@ -290,6 +310,15 @@ def get_user_notes(recording_id: int) -> str | None:
     return row[0] if row else None
 
 
+def update_recording_duration(recording_id: int, duration: float) -> None:
+    """Update duration and file_size after an in-place crop."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE recordings SET duration = ? WHERE id = ?",
+            (duration, recording_id),
+        )
+
+
 def save_metadata(filepath: str, source: str, start_time: datetime.datetime,
                   end_time: datetime.datetime, rate: int, channels: int) -> dict:
     """Insert a new recording row and return its metadata as a dict."""
@@ -350,7 +379,8 @@ def load_metadata(folder: str) -> list[dict]:
             "(transcript IS NOT NULL) as has_transcript, project, meeting, "
             "language, "
             "(transcript_speaker IS NOT NULL) as has_speaker, "
-            "(notes IS NOT NULL) as has_notes "
+            "(notes IS NOT NULL) as has_notes, "
+            "user_notes "
             "FROM recordings ORDER BY start_time DESC"
         ).fetchall()
 
@@ -367,7 +397,7 @@ def load_metadata(folder: str) -> list[dict]:
     recs = []
     missing_count = 0
     for row in rows:
-        row_id, fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, language, has_speaker, has_notes = row
+        row_id, fp, source, st, et, dur, rate, channels, fsize, has_transcript, project, meeting, language, has_speaker, has_notes, user_notes = row
         file_missing = False
         if not os.path.exists(fp):
             basename = os.path.basename(fp)
@@ -396,6 +426,7 @@ def load_metadata(folder: str) -> list[dict]:
             "project": project or "",
             "meeting": meeting or "",
             "language": language or "",
+            "user_notes": user_notes or "",
             "file_missing": file_missing,
             "auto_imported": False,
         })
@@ -558,3 +589,23 @@ def update_project(pid: int, **fields) -> None:
 def delete_project(pid: int) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("DELETE FROM projects WHERE id = ?", (pid,))
+
+
+# ── Diario ────────────────────────────────────────────────────────────────────
+
+def get_diario(date: str) -> dict | None:
+    """Return the parsed diario state for the given YYYY-MM-DD date, or None."""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT state FROM diario WHERE date = ?", (date,)
+        ).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def save_diario(date: str, state: dict) -> None:
+    """Upsert the diario state JSON blob for the given YYYY-MM-DD date."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO diario (date, state) VALUES (?, ?)",
+            (date, json.dumps(state)),
+        )

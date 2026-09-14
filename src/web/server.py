@@ -10,7 +10,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -81,16 +81,16 @@ async def _on_recording_done(meta: dict | None, reason: str | None) -> None:
         await state.broadcast({"type": "recording_stopped", "meta": None, "reason": reason})
 
 
-def _transcribe_done_cb(recording_id: int, text: str | None, language: str) -> None:
+def _transcribe_done_cb(recording_id: int, text: str | None, language: str, error: str | None = None, warning: str | None = None) -> None:
     """Called from transcription thread. Schedules async work on the event loop."""
     async def _cb():
         state.transcribing.discard(recording_id)
-        await state.broadcast({
-            "type": "transcribed",
-            "id": recording_id,
-            "ok": text is not None,
-            "language": language,
-        })
+        payload = {"type": "transcribed", "id": recording_id, "ok": text is not None, "language": language}
+        if error:
+            payload["error"] = error
+        if warning:
+            payload["warning"] = warning
+        await state.broadcast(payload)
     asyncio.run_coroutine_threadsafe(_cb(), state.loop)
 
 
@@ -107,7 +107,13 @@ def _notes_done_cb(recording_id: int, notes: str | None) -> None:
 
 
 def _start_monitor() -> None:
-    """Start a level-only monitor (no recording) in a daemon thread."""
+    """Start a level-only monitor (no recording) in a daemon thread.
+
+    No-ops when the panel is hidden — avoids burning CPU on WASAPI callbacks
+    and NumPy RMS computations while nobody is watching the VU meters.
+    """
+    if not state.panel_visible:
+        return
     if state.monitor_stop:
         return  # already running
     ev = threading.Event()
@@ -207,6 +213,19 @@ def update_tags(rid: int, body: TagUpdate):
     return {"ok": True}
 
 
+class ProjectRename(BaseModel):
+    old_name: str
+    new_name: str
+
+
+@app.post("/api/projects/rename")
+def rename_project(body: ProjectRename):
+    if not body.old_name:
+        raise HTTPException(400, "old_name is required")
+    count = db.rename_project(body.old_name, body.new_name.strip())
+    return {"ok": True, "updated": count}
+
+
 @app.delete("/api/recordings/{rid}")
 def delete_recording(rid: int):
     recs = db.load_metadata(FOLDER)
@@ -223,7 +242,6 @@ def delete_recording(rid: int):
 @app.get("/api/recordings/{rid}/transcript")
 def get_transcript(rid: int):
     return {
-        "corrected": db.get_transcript(rid),
         "raw": db.get_transcript_raw(rid),
         "language": db.get_language(rid),
         "speaker": db.get_transcript_speaker(rid),
@@ -526,6 +544,94 @@ def serve_audio(rid: int):
     return FileResponse(rec["filepath"], media_type="audio/wav")
 
 
+# ── Waveform peaks & crop ────────────────────────────────────────────────────
+
+@app.get("/api/recordings/{rid}/peaks")
+def get_recording_peaks(rid: int, n: int = 600):
+    import soundfile as sf
+    import numpy as np
+    recs = db.load_metadata(FOLDER)
+    rec = next((r for r in recs if r["id"] == rid), None)
+    if not rec or rec["file_missing"]:
+        raise HTTPException(404, "audio file not found")
+    try:
+        data, sr = sf.read(rec["filepath"], dtype="float32")
+    except Exception as e:
+        raise HTTPException(500, f"failed to read audio: {e}")
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    total = len(data)
+    bucket = max(1, total // n)
+    peaks = []
+    for i in range(n):
+        s = i * bucket
+        e = min(total, s + bucket)
+        if s >= total:
+            break
+        peaks.append(float(np.max(np.abs(data[s:e]))))
+    has_backup = os.path.exists(rec["filepath"] + ".bak")
+    return {"peaks": peaks, "duration": float(total / sr), "sample_rate": int(sr), "has_backup": has_backup}
+
+
+@app.post("/api/recordings/{rid}/crop")
+async def crop_recording(rid: int, request: Request):
+    import soundfile as sf
+    body = await request.json()
+    start_sec = float(body.get("start", 0))
+    end_sec = body.get("end")
+    recs = db.load_metadata(FOLDER)
+    rec = next((r for r in recs if r["id"] == rid), None)
+    if not rec:
+        raise HTTPException(404, "recording not found")
+    if rec.get("file_missing"):
+        raise HTTPException(404, "audio file not found")
+    filepath = rec["filepath"]
+    try:
+        data, sr = sf.read(filepath)
+    except Exception as e:
+        raise HTTPException(500, f"failed to read audio: {e}")
+    total_frames = len(data) if data.ndim == 1 else data.shape[0]
+    start_frame = max(0, int(start_sec * sr))
+    end_frame = min(total_frames, int(float(end_sec) * sr) if end_sec is not None else total_frames)
+    if start_frame >= end_frame:
+        raise HTTPException(400, "invalid crop range")
+    cropped = data[start_frame:end_frame] if data.ndim == 1 else data[start_frame:end_frame, :]
+    backup_path = filepath + ".bak"
+    if not os.path.exists(backup_path):
+        import shutil
+        shutil.copy2(filepath, backup_path)
+    try:
+        sf.write(filepath, cropped, sr)
+    except Exception as e:
+        raise HTTPException(500, f"failed to write audio: {e}")
+    new_duration = (end_frame - start_frame) / sr
+    db.update_recording_duration(rid, new_duration)
+    return {"ok": True, "duration": new_duration, "has_backup": True}
+
+
+@app.post("/api/recordings/{rid}/restore")
+def restore_recording(rid: int):
+    import soundfile as sf
+    import shutil
+    recs = db.load_metadata(FOLDER)
+    rec = next((r for r in recs if r["id"] == rid), None)
+    if not rec:
+        raise HTTPException(404, "recording not found")
+    filepath = rec["filepath"]
+    backup_path = filepath + ".bak"
+    if not os.path.exists(backup_path):
+        raise HTTPException(404, "no backup found")
+    shutil.move(backup_path, filepath)
+    try:
+        data, sr = sf.read(filepath)
+        total = len(data) if data.ndim == 1 else data.shape[0]
+        duration = total / sr
+    except Exception:
+        duration = rec["duration"]
+    db.update_recording_duration(rid, duration)
+    return {"ok": True, "duration": duration}
+
+
 # ── REST: work sessions (Focus Time) ─────────────────────────────────────────
 
 @app.get("/api/work-sessions/current")
@@ -590,6 +696,26 @@ def jiggler_stop():
 @app.get("/api/jiggler/status")
 def jiggler_status():
     return {"running": _jiggler.running}
+
+
+# ── REST: display visibility (Electron panel open/close) ─────────────────────
+
+@app.post("/api/display/visible")
+def display_visible():
+    """Electron calls this when the panel expands — start audio monitoring."""
+    state.panel_visible = True
+    if not state.recording:
+        _start_monitor()
+    return {"ok": True}
+
+
+@app.post("/api/display/hidden")
+def display_hidden():
+    """Electron calls this when the panel collapses — stop audio monitoring."""
+    state.panel_visible = False
+    if not state.recording:
+        _stop_monitor()
+    return {"ok": True}
 
 
 # ── WebSocket: /ws/app ────────────────────────────────────────────────────────
@@ -685,7 +811,30 @@ async def calendar_events(days: int = 1):
         return {"ok": True, "events": events}
     except Exception as e:
         log.warning("Calendar fetch failed: %s", e)
-        return {"ok": False, "error": str(e), "events": []}
+        err = str(e)
+        if "Outlook.Application" in err or "RPC" in err or "com_error" in type(e).__name__:
+            err = "Could not connect to Outlook. Make sure Outlook (classic) is open and try again."
+        return {"ok": False, "error": err, "events": []}
+
+
+# ── REST: Diario ─────────────────────────────────────────────────────────────
+
+class DiarioBody(BaseModel):
+    state: dict
+
+
+@app.get("/api/diario")
+def get_diario_endpoint():
+    today = datetime.date.today().isoformat()
+    state_data = db.get_diario(today)
+    return {"ok": True, "state": state_data}
+
+
+@app.put("/api/diario")
+def save_diario_endpoint(body: DiarioBody):
+    today = datetime.date.today().isoformat()
+    db.save_diario(today, body.state)
+    return {"ok": True}
 
 
 # ── REST: OneNote ─────────────────────────────────────────────────────────────

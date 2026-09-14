@@ -86,9 +86,21 @@ You can also **import** an existing audio file (WAV, or any format if ffmpeg is 
 
 ### History
 
-Browse all past recordings as cards. Each card shows the date, duration, project, meeting name, and processing status. Click a card to expand it and view the full transcript and bullet notes. Cards can be filtered by project, date range, or keyword.
+Browse all past recordings as cards. Each card shows:
+- Meeting name (editable inline), project tag, source, duration, and transcript status
+- A compact audio player with waveform seek
+- **Footer actions:** Transcribe (primary, glows indigo when no transcript), folder icon to open file location, trash icon to delete, and a **Details** pill that expands the card
+
+Cards are centered and capped at 780 px wide so they never stretch edge-to-edge.
+
+Expanding a card opens a three-tab detail panel:
+1. **Notes** (active by default) — personal notes textarea, auto-saved on blur
+2. **Transcript** — full Whisper transcript
+3. **Speakers** — diarized speaker transcript (when available)
 
 A timeline bar at the top shows all recordings grouped by month as colored dots — click any dot to jump to that recording.
+
+Cards can be filtered by project, date range, or keyword search.
 
 ---
 

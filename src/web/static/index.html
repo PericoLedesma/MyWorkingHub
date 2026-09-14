@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+<div id="toast-container"></div>
 <div id="root">
 
   <!-- ── Body: sidebar + pages ─────────────────────────────── -->
@@ -67,41 +68,9 @@
 
     <div id="content">
 
-      <!-- ── Page: Home ────────────────────────────────────── -->
+      <!-- ── Page: Home (Diario) ──────────────────────────── -->
       <div id="page-home" class="page">
-        <div id="home-page">
-
-          <div class="home-header">
-            <div>
-              <div class="home-hello" id="home-hello">Good morning</div>
-              <div class="home-date" id="home-date"></div>
-            </div>
-          </div>
-
-          <div class="home-stats-strip">
-            <div class="home-stat" onclick="showPage('focustime')" title="Focus Time">
-              <div class="home-stat-value" id="home-focus-time">–</div>
-              <div class="home-stat-label">Focus today</div>
-            </div>
-            <div class="home-stat-divider"></div>
-            <div class="home-stat" onclick="showPage('history')" title="History">
-              <div class="home-stat-value" id="home-rec-count">–</div>
-              <div class="home-stat-label">Recordings</div>
-            </div>
-          </div>
-
-          <div id="home-next-card" class="home-next-card" style="display:none" onclick="showPage('calendar')">
-            <div class="home-next-eyebrow">Up next</div>
-            <div class="home-next-title" id="home-next-title"></div>
-            <div class="home-next-time" id="home-next-time"></div>
-          </div>
-
-          <div>
-            <div class="home-section-label">Recent recordings</div>
-            <div id="home-recent-list"></div>
-          </div>
-
-        </div>
+        <div id="diario-wrap"></div>
       </div>
 
       <!-- ── Page: Recordings ─────────────────────────────── -->
@@ -156,6 +125,20 @@
                 <div id="meeting-now-chip" class="meeting-now-chip" style="display:none"></div>
               </div>
             </div>
+            <div class="rec-station-notes-row">
+              <label class="rec-meta-label" for="new-user-notes">Personal notes</label>
+              <textarea id="new-user-notes" class="rec-user-notes rec-station-notes-ta"
+                        placeholder="Jot anything down during the recording…"
+                        onclick="event.stopPropagation()"></textarea>
+            </div>
+          </div>
+
+
+          <div class="rec-station-options">
+            <button id="live-tx-toggle" class="live-tx-toggle-btn" onclick="toggleLiveTranscript()">
+              <span class="live-tx-toggle-pip"></span>
+              <span class="live-tx-toggle-label">Live transcript</span>
+            </button>
           </div>
 
           <div class="rec-station-action">
@@ -175,28 +158,58 @@
             <div id="live-tx-body"></div>
           </div>
 
+          <div id="rec-waveform-panel" style="display:none">
+            <div class="rec-wf-header">
+              <span class="rec-wf-title">Recording saved</span>
+              <audio id="rec-wf-audio" preload="none"></audio>
+              <div class="audio-player rec-wf-player">
+                <button class="audio-play-btn" id="rec-wf-play-btn" aria-label="Play">▶</button>
+                <span class="audio-time" id="rec-wf-time">0:00</span>
+                <span class="audio-dur" id="rec-wf-dur">--:--</span>
+              </div>
+            </div>
+            <div id="rec-wf-status" class="wf-status"></div>
+            <canvas id="rec-wf-canvas" class="wf-canvas"></canvas>
+            <div class="wf-controls">
+              <span id="rec-wf-info" class="wf-crop-info">Drag to select the region to keep</span>
+              <span id="rec-wf-clear" class="wf-clear-btn" style="display:none" onclick="recWfClear()">Clear</span>
+              <button id="rec-wf-crop-btn" class="act-btn" disabled onclick="recWfCrop()">Crop to selection</button>
+            </div>
+            <div id="rec-wf-restore-row" style="display:none">
+              <button class="act-btn" onclick="recWfRestore()">↩ Restore original</button>
+            </div>
+          </div>
+
         </div>
       </div>
 
       <!-- ── Page: History ────────────────────────────────── -->
       <div id="page-history" class="page" style="display:none">
-        <div id="history-tl-bar"><div class="htl-inner"><div class="htl-track"></div></div></div>
+        <div id="history-tl-bar" style="display:none"><div class="htl-inner"><div class="htl-track"></div></div></div>
         <div id="main">
 
           <div id="recordings-panel">
             <div id="filter-bar">
-              <div class="filter-row-top">
-                <input id="search-input" type="text" placeholder="Search…" oninput="filterRecordings()" />
-                <button class="import-btn" onclick="document.getElementById('import-file-input').click()">
-                  ↑ Import
+              <div class="filter-header">
+                <div class="filter-header-left">
+                  <span class="filter-title">Recordings</span>
+                  <span id="rec-count" class="rec-count"></span>
+                </div>
+                <button class="import-btn" onclick="document.getElementById('import-file-input').click()" title="Import audio file">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="3"/><polyline points="5 10 12 3 19 10"/><line x1="5" y1="21" x2="19" y2="21"/></svg>
+                  Import
                 </button>
                 <input id="import-file-input" type="file" accept=".wav,.mp3,.m4a,.mp4,.ogg,.flac"
                        onchange="importFile(this)" />
               </div>
-              <div class="filter-row-bottom">
+              <div class="filter-search-wrap">
+                <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input id="search-input" type="text" placeholder="Search by name, project, date…" oninput="filterRecordings()" />
+              </div>
+              <div class="filter-row-bottom" id="filter-row-projects">
                 <span class="filter-label">Projects</span>
                 <div id="project-bubbles"></div>
-                <button id="clear-filter-btn" class="clear-filter-btn" onclick="clearFilter()" style="display:none">✕ Clear filter</button>
+                <button id="clear-filter-btn" class="clear-filter-btn" onclick="clearFilter()" style="display:none">✕ Clear</button>
               </div>
             </div>
             <div id="rec-list">
@@ -224,7 +237,7 @@
         <div id="cal-page">
           <div class="cal-header">
             <div class="cal-header-left">
-              <h2 class="cal-title">Today</h2>
+              <h2 class="cal-title">This Week</h2>
               <span class="cal-date" id="cal-date"></span>
             </div>
             <button class="cal-refresh-btn" onclick="calLoad()" title="Refresh">↻</button>
@@ -316,6 +329,17 @@
               <div class="fts-chart-label">Daily focus — last 30 days</div>
               <div class="fts-bars" id="fts-bars"></div>
               <div class="fts-bars-labels" id="fts-bars-labels"></div>
+            </div>
+
+            <div class="fts-chart-section" style="margin-top:28px">
+              <div class="fts-chart-label">Session timeline — last 14 days</div>
+              <div class="fts-tl-wrap">
+                <div class="fts-tl-inner">
+                  <div class="fts-tl-yaxis" id="fts-tl-yaxis"></div>
+                  <div class="fts-tl-body" id="fts-tl-body"></div>
+                </div>
+                <div class="fts-tl-xlabels" id="fts-tl-xlabels"></div>
+              </div>
             </div>
 
           </div><!-- #ft-panel-stats -->
