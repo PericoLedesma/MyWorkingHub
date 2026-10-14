@@ -1,21 +1,25 @@
-const { app, BrowserWindow, screen, ipcMain, Menu, session, Notification } = require('electron');
-const { spawn } = require('child_process');
+const { app, BrowserWindow, screen, ipcMain, Menu, Tray, session, Notification } = require('electron');
+const { spawn, execFileSync } = require('child_process');
 const path = require('path');
 const http = require('http');
 
-const TAB_W   = 48;
-const TAB_H   = 260;
+const TAB_W    = 48;
+const TAB_H    = 274;
+const TAB_THIN = 4;
 const PORT    = 8765;
 const ANIM_MS = 220;
 const PANEL_W = 920;
 
 let tabWin      = null;
 let appWin      = null;
+let tray        = null;
 let python      = null;
 let expanded    = false;
 let animating   = false;
+let tabCollapsed = false;
 let currentPage = 'home';
 let focusActive = false;
+let quitting    = false;
 
 // ---------------------------------------------------------------------------
 // Python server
@@ -28,6 +32,32 @@ function startPython() {
   python.stdout.on('data', d => process.stdout.write(d));
   python.stderr.on('data', d => process.stderr.write(d));
   python.on('error', err => console.error('Python spawn error:', err.message));
+}
+
+// A Python server still listening when we start is an orphan from a previous
+// Electron that crashed or was killed (the single-instance lock rules out a live
+// one). It may be mid-recording, so flush via /api/shutdown before killing it.
+async function clearStaleServer() {
+  try {
+    await fetch(`http://127.0.0.1:${PORT}/api/shutdown`, {
+      method: 'POST', signal: AbortSignal.timeout(35000),
+    });
+  } catch {
+    // Nothing listening (normal case) or it didn't answer — fall through to the
+    // PID check, which is a no-op when the port is free.
+  }
+  let out = '';
+  try { out = execFileSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8' }); }
+  catch { return; }
+  const pids = new Set();
+  for (const line of out.split(/\r?\n/)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols[1]?.endsWith(`:${PORT}`) && cols[3] === 'LISTENING') pids.add(Number(cols[4]));
+  }
+  for (const pid of pids) {
+    try { process.kill(pid); } catch {}
+  }
+  if (pids.size) await new Promise(r => setTimeout(r, 500));
 }
 
 function waitForServer(maxMs = 15000) {
@@ -83,8 +113,12 @@ function createTabWin() {
     tabWin.webContents.send('focus-state', focusActive);
   });
 
+  closeQuitsApp(tabWin);
+
   tabWin.webContents.on('context-menu', () => {
     Menu.buildFromTemplate([
+      { label: 'Collapse tab', click: () => collapseTab() },
+      { type: 'separator' },
       { label: 'Quit My Working Hub', click: () => app.quit() },
     ]).popup({ window: tabWin });
   });
@@ -106,6 +140,18 @@ function createAppWin() {
   appWin.loadURL(`http://127.0.0.1:${PORT}`);
   appWin.setAlwaysOnTop(true, 'floating');
   appWin.setIgnoreMouseEvents(true);
+  closeQuitsApp(appWin);
+}
+
+// Closing either window (Alt+F4, taskbar "Close window") must quit the whole
+// app. Otherwise the window is destroyed while the other one keeps the process
+// alive, so 'window-all-closed' never fires and the hub lingers half-dead.
+function closeQuitsApp(win) {
+  win.on('close', (e) => {
+    if (quitting) return;
+    e.preventDefault();
+    app.quit();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -169,10 +215,70 @@ function collapse() {
 }
 
 // ---------------------------------------------------------------------------
+// Tab collapse / expand (shrinks to a 4 px sliver, click to restore)
+// ---------------------------------------------------------------------------
+
+function animateTabWidth(targetWidth, onDone) {
+  if (!tabWin || tabWin.isDestroyed()) return;
+  const { workRight } = getLayout();
+  const { y, width: startWidth } = tabWin.getBounds();
+  const t0 = Date.now();
+  function step() {
+    if (!tabWin || tabWin.isDestroyed()) return;
+    const t    = Math.min((Date.now() - t0) / ANIM_MS, 1);
+    const ease = 1 - Math.pow(1 - t, 3);
+    const w    = Math.max(1, Math.round(startWidth + (targetWidth - startWidth) * ease));
+    tabWin.setBounds({ x: workRight - w, y, width: w, height: TAB_H });
+    if (t < 1) setTimeout(step, 14);
+    else if (onDone) onDone();
+  }
+  step();
+}
+
+function updateTrayMenu() {
+  if (!tray) return;
+  tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: tabCollapsed ? 'Restore tab' : 'Collapse tab',
+      click: () => tabCollapsed ? expandTab() : collapseTab(),
+    },
+    { type: 'separator' },
+    { label: 'Quit My Working Hub', click: () => app.quit() },
+  ]));
+}
+
+function collapseTab() {
+  if (tabCollapsed) return;
+  if (expanded) collapse();
+  tabCollapsed = true;
+  tabWin?.webContents.send('tab-mode', 'thin');
+  animateTabWidth(TAB_THIN, () => updateTrayMenu());
+}
+
+function expandTab() {
+  if (!tabCollapsed) return;
+  tabCollapsed = false;
+  animateTabWidth(TAB_W, () => {
+    tabWin?.webContents.send('tab-mode', 'normal');
+    updateTrayMenu();
+  });
+}
+
+function createTray() {
+  const iconPath = path.join(__dirname, 'tray.png');
+  tray = new Tray(iconPath);
+  tray.setToolTip('My Working Hub');
+  updateTrayMenu();
+  tray.on('click', () => tabCollapsed ? expandTab() : (expanded ? collapse() : expand()));
+}
+
+// ---------------------------------------------------------------------------
 // IPC
 // ---------------------------------------------------------------------------
 
-ipcMain.on('toggle', () => expanded ? collapse() : expand());
+ipcMain.on('toggle',       () => expanded ? collapse() : expand());
+ipcMain.on('collapse-tab', () => collapseTab());
+ipcMain.on('restore-tab',  () => expandTab());
 ipcMain.on('quit',   () => app.quit());
 ipcMain.on('page-change', (_event, name) => {
   currentPage = name;
@@ -194,11 +300,25 @@ ipcMain.on('show-notification', (_event, { title, body }) => {
 // App lifecycle
 // ---------------------------------------------------------------------------
 
+// Only one hub at a time. A second launch (shortcut double-click, .bat) just
+// brings up the existing panel instead of starting a competing Python server.
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0);
+}
+
+app.on('second-instance', () => {
+  if (!tabWin || !appWin) return;   // still starting up
+  if (tabCollapsed) expandTab();
+  if (!expanded) expand();
+  else appWin.focus();
+});
+
 app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
     callback(permission === 'media');
   });
   await session.defaultSession.clearCache();
+  await clearStaleServer();
   startPython();
   try { await waitForServer(); }
   catch (e) { console.error(e.message); }
@@ -207,17 +327,23 @@ app.whenReady().then(async () => {
   notifyDisplay(false);
   createTabWin();
   createAppWin();
+  createTray();
 });
 
-let _quitting = false;
-
 app.on('before-quit', (e) => {
-  if (_quitting) return;
+  if (quitting) return;
   e.preventDefault();
-  _quitting = true;
+  quitting = true;
+  // Disappear immediately — flushing a recording can take a few seconds.
+  tabWin?.hide();
+  appWin?.hide();
+  tray?.destroy();
+  tray = null;
   // Ask Python to flush any active recording before we hard-kill it.
   // If the server is already gone, fetch() rejects immediately — that's fine.
-  fetch(`http://127.0.0.1:${PORT}/api/shutdown`, { method: 'POST' })
+  // The timeout covers the server's 30 s recording join so a hung Python can
+  // never keep the app from exiting.
+  fetch(`http://127.0.0.1:${PORT}/api/shutdown`, { method: 'POST', signal: AbortSignal.timeout(35000) })
     .catch(() => {})
     .finally(() => { python?.kill(); app.quit(); });
 });

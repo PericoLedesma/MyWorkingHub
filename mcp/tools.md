@@ -12,7 +12,6 @@ Current state of the Claude Desktop integration. Maps app capabilities to tool g
 | **Live transcription** | faster-whisper (`small` by default) runs locally, producing incremental segments every 5 s while recording. |
 | **Post-recording transcription** | OpenAI `whisper-1` API call after recording stops; language auto-detected. |
 | **AI bullet notes** | DeepSeek `deepseek-chat` via tool-calling (`guardar_notas`): action items, key points, decisions as markdown bullets. |
-| **Search & chat** | DeepSeek streaming agent over `/ws/chat`; calls `buscar_grabaciones` to query SQLite full-text across transcripts. |
 | **Focus Time tracking** | Work sessions with start/stop/duration stored in `focus_time.db`; daily aggregates available. |
 | **Mouse jiggler** | Prevents screen lock by nudging the cursor; auto-stops on user input. UI-only, no MCP tools. |
 | **Outlook calendar** | Reads upcoming meetings via COM (`pywin32`); requires desktop Outlook installed. |

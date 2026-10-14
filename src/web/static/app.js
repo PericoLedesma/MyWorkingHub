@@ -4,10 +4,10 @@
 // ── Global state ──────────────────────────────────────────────────────────────
 const S = {
   ws:              null,
-  wsChat:          null,
   wsRetryDelay:    1000,
   recordings:      [],       // full list from API
   filtered:        [],       // after search/filter
+  selectedDate:    '',       // YYYY-MM-DD day filter (defaults to today)
   recording:       false,
   recordingStart:  null,     // epoch seconds
   timerInterval:   null,
@@ -17,11 +17,8 @@ const S = {
   appLevel:        0,
   dispMic:         0,        // smoothed display level
   dispApp:         0,
-  chatBubble:      null,     // current streaming assistant bubble
   pendingJobs:     {},       // {id: Set<'transcribe'|'notes'>}
   expandedCardId:  null,     // id of currently expanded card, or null
-  nextProject:          '',       // project to apply when recording stops
-  nextMeeting:          '',       // meeting to apply when recording stops
   calEvents:            [],       // today's calendar events (cached)
   projects:             [],       // project entities from /api/projects (for color lookup)
   liveTranscriptEnabled: false,   // whether to show live transcript panel
@@ -111,6 +108,11 @@ function renderHistoryBar() {
 
 function scrollToCard(id) {
   if (document.getElementById('page-history').style.display === 'none') showPage('history');
+  const rec = S.recordings.find(r => r.id === id);
+  if (rec && rec.start_time) {
+    const recDay = localDateStr(new Date(rec.start_time));
+    if (S.selectedDate !== recDay) setDayFilter(recDay);
+  }
   const card = document.querySelector(`.rec-card[data-id="${id}"]`);
   if (!card) return;
   card.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -225,6 +227,12 @@ function onWsMessage(msg) {
       (msg.transcribing || []).forEach(id => addJob(id, 'transcribe'));
       updateRecordButton();
       if (S.recording) startTimer();
+      // Server owns the pending labels — restore the fields after a reload/reconnect
+      if (S.recording) applyPendingTags(msg.project || '', msg.meeting || '');
+      break;
+
+    case 'recording_tags':
+      applyPendingTags(msg.project || '', msg.meeting || '');
       break;
 
     case 'level':
@@ -239,8 +247,7 @@ function onWsMessage(msg) {
       startTimer();
       clearLiveTranscript();
       document.getElementById('live-transcript-panel').style.display = S.liveTranscriptEnabled ? '' : 'none';
-      { const badge = document.getElementById('rec-linked-meeting');
-        if (badge) { badge.textContent = S.nextMeeting ? `📅 ${S.nextMeeting}` : ''; badge.style.display = S.nextMeeting ? '' : 'none'; } }
+      applyPendingTags(msg.project || '', msg.meeting || '');
       break;
 
     case 'live_transcript':
@@ -253,14 +260,15 @@ function onWsMessage(msg) {
       updateRecordButton();
       stopTimer();
       { const badge = document.getElementById('rec-linked-meeting'); if (badge) badge.style.display = 'none'; }
+      // Labels were written to the DB by the server before this event was sent,
+      // so msg.meta already carries the final project / meeting values.
+      clearPendingTagFields();
       // Stay on Recordings page — live transcript remains visible for any in-flight chunks.
       // The recording is saved in the background; user can navigate to History when ready.
       if (msg.meta) {
         const newRec = msg.meta;
         S.recordings.unshift(newRec);
         (async () => {
-          if (S.nextProject) { await saveTag(newRec.id, 'project', S.nextProject); S.nextProject = ''; }
-          if (S.nextMeeting) { await saveTag(newRec.id, 'meeting', S.nextMeeting); S.nextMeeting = ''; }
           const notesTa = document.getElementById('new-user-notes');
           const notesText = notesTa ? notesTa.value.trim() : '';
           if (notesText) {
@@ -318,85 +326,66 @@ function onWsMessage(msg) {
   }
 }
 
-// ── WebSocket: /ws/chat ───────────────────────────────────────────────────────
-function connectChatWS() {
-  const ws = new WebSocket(`ws://${location.host}/ws/chat`);
-  S.wsChat = ws;
-
-  ws.onmessage = (ev) => {
-    let msg;
-    try { msg = JSON.parse(ev.data); } catch { return; }
-    onChatMessage(msg);
-  };
-
-  ws.onclose = () => {
-    S.wsChat = null;
-    setTimeout(connectChatWS, 2000);
-  };
-}
-
-function onChatMessage(msg) {
-  if (msg.type === 'token') {
-    if (S.chatBubble) {
-      S.chatBubble.textContent += msg.text;
-      scrollChatToBottom();
-    }
-  } else if (msg.type === 'done') {
-    if (S.chatBubble) {
-      if (!S.chatBubble.textContent.trim() && msg.text) {
-        S.chatBubble.textContent = msg.text;
-      }
-      S.chatBubble.classList.remove('streaming');
-      S.chatBubble = null;
-    }
-    document.getElementById('chat-send').disabled = false;
-    document.getElementById('chat-input').disabled = false;
-  }
-}
-
-// ── Chat UI ───────────────────────────────────────────────────────────────────
-function appendChatBubble(role, text) {
-  const el = document.createElement('div');
-  el.className = `chat-bubble ${role}`;
-  el.textContent = text;
-  document.getElementById('chat-messages').appendChild(el);
-  scrollChatToBottom();
-  return el;
-}
-
-function scrollChatToBottom() {
-  const el = document.getElementById('chat-messages');
-  el.scrollTop = el.scrollHeight;
-}
-
-function sendChatMessage() {
-  const input = document.getElementById('chat-input');
-  const text = input.value.trim();
-  if (!text || !S.wsChat || S.wsChat.readyState !== WebSocket.OPEN) return;
-
-  input.value = '';
-  appendChatBubble('user', text);
-  S.chatBubble = appendChatBubble('assistant', '');
-  S.chatBubble.classList.add('streaming');
-  document.getElementById('chat-send').disabled = true;
-  document.getElementById('chat-input').disabled = true;
-
-  S.wsChat.send(JSON.stringify({ text }));
-}
-
-function onChatKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendChatMessage();
-  }
-}
-
 // ── Record controls ───────────────────────────────────────────────────────────
 function setSource(src) {
   S.source = src;
   ['mic','app','both'].forEach(s => {
     document.getElementById(`src-${s}`).classList.toggle('active', s === src);
   });
+}
+
+// ── Pending project / meeting labels ─────────────────────────────────────────
+// The server is the owner of these while a recording is in progress. The two
+// inputs stay editable during the recording; every edit is pushed to the server
+// (debounced), which writes them to the DB when the recording stops.
+
+let _tagPushTimer = null;
+
+function applyPendingTags(project, meeting) {
+  const pi = document.getElementById('new-project');
+  const mi = document.getElementById('new-meeting');
+  // Don't stomp on a field the user is actively typing in
+  if (pi && document.activeElement !== pi) pi.value = project;
+  if (mi && document.activeElement !== mi) mi.value = meeting;
+  const badge = document.getElementById('rec-linked-meeting');
+  if (badge) {
+    badge.textContent = meeting ? `📅 ${meeting}` : '';
+    badge.style.display = meeting ? '' : 'none';
+  }
+}
+
+function clearPendingTagFields() {
+  if (_tagPushTimer) { clearTimeout(_tagPushTimer); _tagPushTimer = null; }
+  const pi = document.getElementById('new-project');
+  const mi = document.getElementById('new-meeting');
+  if (pi) pi.value = '';
+  if (mi) mi.value = '';
+}
+
+/** Called from the Project / Meeting inputs on every edit. */
+function onPendingTagInput() {
+  if (!S.recording) return;   // not recording: values are read at Record press
+  const meeting = document.getElementById('new-meeting').value.trim();
+  const badge = document.getElementById('rec-linked-meeting');
+  if (badge) {
+    badge.textContent = meeting ? `📅 ${meeting}` : '';
+    badge.style.display = meeting ? '' : 'none';
+  }
+  if (_tagPushTimer) clearTimeout(_tagPushTimer);
+  _tagPushTimer = setTimeout(pushPendingTags, 400);
+}
+
+async function pushPendingTags() {
+  _tagPushTimer = null;
+  if (!S.recording) return;
+  try {
+    await api('PATCH', '/api/recording/tags', {
+      project: document.getElementById('new-project').value.trim(),
+      meeting: document.getElementById('new-meeting').value.trim(),
+    });
+  } catch (e) {
+    console.error('pushPendingTags error:', e);
+  }
 }
 
 function updateRecordButton() {
@@ -418,26 +407,31 @@ async function toggleRecord() {
 
   try {
     if (S.recording) {
+      // Flush any debounced label edit before the recording is written to disk
+      if (_tagPushTimer) { clearTimeout(_tagPushTimer); await pushPendingTags(); }
       await api('POST', '/api/record/stop');
     } else {
       recWfHide();
       const sel = document.getElementById('device-select');
       const deviceIndex = sel.value !== '' ? parseInt(sel.value) : null;
-      S.nextProject = document.getElementById('new-project').value.trim();
-      S.nextMeeting = document.getElementById('new-meeting').value.trim();
+      const project = document.getElementById('new-project').value.trim();
+      let meeting   = document.getElementById('new-meeting').value.trim();
       // Auto-link to a currently-active Outlook meeting if the user left the field blank
-      if (!S.nextMeeting && S.calEvents.length) {
+      if (!meeting && S.calEvents.length) {
         const now = new Date();
         const active = S.calEvents.find(e => new Date(e.start) <= now && now < new Date(e.end));
-        if (active) S.nextMeeting = active.subject;
+        if (active) meeting = active.subject;
       }
-      document.getElementById('new-project').value = '';
-      document.getElementById('new-meeting').value = '';
       const notesTa = document.getElementById('new-user-notes');
       if (notesTa) notesTa.value = '';
+      // The labels travel with the start call: the server holds them and writes
+      // them to the DB when the recording stops, so they survive a UI reload and
+      // are applied even if no browser is connected at that moment.
       const result = await api('POST', '/api/record/start', {
         source: S.source,
         device_index: deviceIndex,
+        project,
+        meeting,
       });
       if (result?.ok) {
         S.recording = true;
@@ -567,11 +561,66 @@ async function loadDevices() {
   });
 }
 
+// ── Day filter helpers ────────────────────────────────────────────────────────
+function localDateStr(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function formatDayLabel(dateStr) {
+  const today = localDateStr(new Date());
+  const yest = new Date(); yest.setDate(yest.getDate() - 1);
+  const yesterday = localDateStr(yest);
+  if (dateStr === today) return 'Today';
+  if (dateStr === yesterday) return 'Yesterday';
+  const [y, mo, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, mo - 1, d);
+  const daysDiff = Math.round((new Date(today) - dt) / 86400000);
+  if (daysDiff <= 6) return dt.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric' });
+  return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function setDayFilter(dateStr) {
+  S.selectedDate = dateStr;
+  updateDateBubbles();
+  filterRecordings();
+}
+
+function updateDateBubbles() {
+  const container = document.getElementById('date-bubbles');
+  const row = document.getElementById('filter-row-dates');
+  if (!container || !row) return;
+
+  const hasProjectFilter = document.querySelectorAll('#project-bubbles .proj-bubble.active').length > 0;
+  if (hasProjectFilter) { row.style.display = 'none'; return; }
+
+  const today = localDateStr(new Date());
+  const cutoff = localDateStr(new Date(Date.now() - 29 * 86400000));
+  const days = new Set([today]);
+  S.recordings.forEach(r => { if (r.start_time) { const d = localDateStr(new Date(r.start_time)); if (d >= cutoff) days.add(d); } });
+  const sorted = [...days].sort((a, b) => b.localeCompare(a));
+
+  row.style.display = '';
+  container.innerHTML = '';
+  sorted.forEach(dateStr => {
+    const b = document.createElement('button');
+    b.className = 'date-bubble' + (dateStr === S.selectedDate ? ' active' : '');
+    b.dataset.date = dateStr;
+    b.textContent = formatDayLabel(dateStr);
+    b.onclick = () => setDayFilter(dateStr);
+    container.appendChild(b);
+  });
+}
+
 // ── Recordings list ───────────────────────────────────────────────────────────
 async function loadRecordings() {
+  S.selectedDate = localDateStr(new Date());
   const list = await fetch('/api/recordings').then(r => r.json()).catch(() => []);
   S.recordings = list;
   updateProjectFilter();
+  updateDateBubbles();
   filterRecordings();
   renderHistoryBar();
 }
@@ -639,9 +688,11 @@ function filterRecordings() {
     [...document.querySelectorAll('#project-bubbles .proj-bubble.active')]
       .map(b => b.dataset.project.toLowerCase())
   );
+  const hasProjectFilter = activeProjects.size > 0;
   const q = document.getElementById('search-input').value.toLowerCase();
   S.filtered = S.recordings.filter(r => {
-    if (activeProjects.size && !activeProjects.has((r.project || '').toLowerCase())) return false;
+    if (!hasProjectFilter && S.selectedDate && localDateStr(new Date(r.start_time)) !== S.selectedDate) return false;
+    if (hasProjectFilter && !activeProjects.has((r.project || '').toLowerCase())) return false;
     if (q) {
       const hay = [r.project, r.meeting, r.source, r.start_time].join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
@@ -649,13 +700,10 @@ function filterRecordings() {
     return true;
   });
   const btn = document.getElementById('clear-filter-btn');
-  if (btn) btn.style.display = (activeProjects.size || q) ? '' : 'none';
+  if (btn) btn.style.display = (hasProjectFilter || q) ? '' : 'none';
+  updateDateBubbles();
   const countEl = document.getElementById('rec-count');
-  if (countEl) {
-    const total = S.recordings.length;
-    const shown = S.filtered.length;
-    countEl.textContent = shown < total ? `${shown} of ${total}` : `${total}`;
-  }
+  if (countEl) countEl.textContent = `${S.filtered.length}`;
   renderList();
 }
 
@@ -681,22 +729,30 @@ function monthLabel(iso) {
 
 function renderList() {
   const el = document.getElementById('rec-list');
+  const hasProjectFilter = document.querySelectorAll('#project-bubbles .proj-bubble.active').length > 0;
   if (S.filtered.length === 0) {
-    el.innerHTML = '<div class="empty-state"><p>No recordings found.</p></div>';
+    const label = hasProjectFilter ? 'for this project' : `on ${formatDayLabel(S.selectedDate).toLowerCase()}`;
+    el.innerHTML = `<div class="empty-state"><p>No recordings ${label}.</p></div>`;
     return;
   }
   let html = '';
-  let lastMonth = null;
-  for (const r of S.filtered) {
-    const mk = monthKey(r.start_time);
-    if (mk !== lastMonth) {
-      if (lastMonth !== null) html += '</div>';
-      html += `<div class="month-sep" onclick="this.classList.toggle('collapsed')" data-month="${mk}"><span class="month-chevron">▾</span><span>${monthLabel(r.start_time)}</span></div><div class="month-group">`;
-      lastMonth = mk;
+  if (hasProjectFilter) {
+    let lastDay = null;
+    for (const r of S.filtered) {
+      const dk = r.start_time ? localDateStr(new Date(r.start_time)) : '';
+      if (dk !== lastDay) {
+        if (lastDay !== null) html += '</div>';
+        html += `<div class="day-sep"><span>${formatDayLabel(dk)}</span></div><div class="month-group">`;
+        lastDay = dk;
+      }
+      html += renderCard(r);
     }
-    html += renderCard(r);
+    if (lastDay !== null) html += '</div>';
+  } else {
+    html = '<div class="month-group">';
+    for (const r of S.filtered) html += renderCard(r);
+    html += '</div>';
   }
-  if (lastMonth !== null) html += '</div>';
   el.innerHTML = html;
   initAudioPlayers(el);
   // Attach tag blur listeners
@@ -736,6 +792,7 @@ function renderCard(r) {
   const folderSvg = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
   const trashSvg  = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>`;
   const chevronSvg = `<svg class="rec-expand-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>`;
+  const calSvg    = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/></svg>`;
 
   const txBtnClass = `act-btn${!r.has_transcript ? ' primary' : ''}${isTranscribing ? ' spinning' : ''}`;
 
@@ -751,6 +808,9 @@ function renderCard(r) {
              data-placeholder="Untitled recording" onclick="event.stopPropagation()">${esc(r.meeting || '')}</div>
         <div class="rec-tags-row">
           <button class="rec-project-tag${r.project ? '' : ' no-project'}" onclick="event.stopPropagation(); openProjectPicker(${r.id}, this)" ${projStyle}>${r.project ? esc(r.project) : 'No project'}</button>
+          <button class="rec-meeting-chip${r.meeting ? '' : ' no-meeting'}"
+                  title="${r.meeting ? 'Meeting options' : 'Link this recording to a meeting from that day'}"
+                  onclick="event.stopPropagation(); openMeetingPicker(${r.id}, this)">${calSvg}<span class="rec-meeting-chip-label">${r.meeting ? 'Meeting' : 'Link meeting'}</span></button>
           <span class="rec-meta-text">${esc(metaParts.join(' · '))}</span>
           ${txBadge}
         </div>
@@ -905,6 +965,11 @@ async function saveTag(id, field, value) {
   const rec = S.recordings.find(r => r.id === id);
   if (rec) rec[field] = value;
   updateProjectFilter();
+  if (field === 'meeting') {
+    // A new title points at a different Outlook event
+    _meetingCache.delete(id);
+    updateMeetingUI(id);
+  }
   if (field === 'project') refreshCard(id);
 }
 
@@ -1076,16 +1141,11 @@ async function toggleCardExpand(id) {
 
 function buildDetailHTML(id, data) {
   const hasTranscript = !!data.raw;
-  const hasSpeaker = !!data.speaker;
   const rec = S.recordings.find(r => r.id === id);
 
   const transcriptPanel = hasTranscript
     ? `<div class="detail-transcript-text">${esc(data.raw)}</div>`
     : `<p class="detail-empty">No transcript yet — click Transcribe to generate one.</p>`;
-
-  const speakersPanel = hasSpeaker
-    ? `<div class="detail-transcript-text">${esc(data.speaker)}</div>`
-    : `<p class="detail-empty">No speaker transcript yet.</p>`;
 
   const notesPanel = `
     <div class="detail-notes-panel">
@@ -1094,15 +1154,17 @@ function buildDetailHTML(id, data) {
     </div>
   `;
 
+  const hasMeeting = !!(rec && rec.meeting);
+
   return `
     <div class="detail-tabs">
       <button class="detail-tab active" data-tab="notes" onclick="switchDetailTab(this,'notes',${id})">Notes</button>
       <button class="detail-tab" data-tab="transcript" onclick="switchDetailTab(this,'transcript',${id})">Transcript</button>
-      <button class="detail-tab${!hasSpeaker ? ' tab-empty' : ''}" data-tab="speakers" onclick="switchDetailTab(this,'speakers',${id})">Speakers</button>
+      ${hasMeeting ? `<button class="detail-tab" data-tab="meeting" onclick="switchDetailTab(this,'meeting',${id})">Meeting</button>` : ''}
     </div>
     <div class="detail-panel" data-tab="notes">${notesPanel}</div>
     <div class="detail-panel" data-tab="transcript" style="display:none">${transcriptPanel}</div>
-    <div class="detail-panel" data-tab="speakers" style="display:none">${speakersPanel}</div>
+    ${hasMeeting ? `<div class="detail-panel" data-tab="meeting" style="display:none"></div>` : ''}
   `;
 }
 
@@ -1114,6 +1176,233 @@ function switchDetailTab(btn, tab, id) {
   card.querySelectorAll('.detail-panel').forEach(p => {
     p.style.display = p.dataset.tab === tab ? '' : 'none';
   });
+  if (tab === 'meeting') loadMeetingPanel(id);
+}
+
+// ── Linked meeting details ───────────────────────────────────────────────────
+// The DB stores only the meeting's subject, so the Outlook event is looked up on
+// demand (by subject, near the recording's start) rather than cached in the row.
+const _meetingCache = new Map();   // rid → /meeting response payload
+
+// Day's calendar events per recording, so reopening the picker is instant.
+// Short-lived: a meeting added in Outlook should show up without a restart.
+const _meetingCandCache = new Map();   // rid → {at, data}
+const _MEETING_CAND_TTL = 60_000;
+
+/** Card chip: pick one of that day's Outlook meetings (or view/clear the link). */
+function openMeetingPicker(rid, btn) {
+  document.querySelectorAll('.proj-picker').forEach(p => p.remove());
+
+  const rec = S.recordings.find(r => r.id === rid);
+  const current = rec?.meeting || '';
+
+  const picker = document.createElement('div');
+  picker.className = 'proj-picker mtg-picker';
+  document.body.appendChild(picker);
+  const rect = btn.getBoundingClientRect();
+  picker.style.top  = (rect.bottom + window.scrollY + 4) + 'px';
+  picker.style.left = (rect.left + window.scrollX) + 'px';
+
+  const close = e => {
+    if (!picker.contains(e.target) && e.target !== btn) {
+      picker.remove();
+      document.removeEventListener('mousedown', close, true);
+    }
+  };
+  document.addEventListener('mousedown', close, true);
+
+  const render = (data) => {
+    picker.innerHTML = '';
+
+    const head = document.createElement('div');
+    head.className = 'mtg-picker-head';
+    head.textContent = `Meetings on ${fmtDateOnly(rec?.start_time)}`;
+    picker.appendChild(head);
+
+    if (!data) {
+      const l = document.createElement('div');
+      l.className = 'mtg-picker-note';
+      l.textContent = 'Loading meetings…';
+      picker.appendChild(l);
+    } else if (!data.ok) {
+      const l = document.createElement('div');
+      l.className = 'mtg-picker-note';
+      l.textContent = data.error || 'Could not read the Outlook calendar.';
+      picker.appendChild(l);
+    } else if (!data.events.length) {
+      const l = document.createElement('div');
+      l.className = 'mtg-picker-note';
+      l.textContent = 'No meetings in the calendar that day.';
+      picker.appendChild(l);
+    } else {
+      data.events.forEach(ev => {
+        const item = document.createElement('button');
+        const isCurrent = ev.subject.trim() === current.trim();
+        item.className = 'proj-picker-item mtg-picker-item' + (isCurrent ? ' active' : '');
+        item.title = ev.subject + (ev.location ? ` — ${ev.location}` : '');
+
+        const time = document.createElement('span');
+        time.className = 'mtg-picker-time';
+        time.textContent = fmtTimeOnly(ev.start);
+        item.appendChild(time);
+
+        const subj = document.createElement('span');
+        subj.className = 'mtg-picker-subject';
+        subj.textContent = ev.subject;
+        item.appendChild(subj);
+
+        // The event covering the recording is nearly always the right one
+        if (ev.overlap && !isCurrent) {
+          const hint = document.createElement('span');
+          hint.className = 'mtg-picker-overlap';
+          hint.textContent = 'during';
+          item.appendChild(hint);
+        }
+
+        item.onclick = async () => {
+          picker.remove();
+          await saveTag(rid, 'meeting', isCurrent ? '' : ev.subject);
+        };
+        picker.appendChild(item);
+      });
+    }
+
+    if (current) {
+      const details = document.createElement('button');
+      details.className = 'proj-picker-item mtg-picker-details';
+      details.textContent = '📅 View meeting details';
+      details.onclick = () => { picker.remove(); openMeetingTab(rid); };
+      picker.appendChild(details);
+
+      const clr = document.createElement('button');
+      clr.className = 'proj-picker-item proj-picker-clear';
+      clr.textContent = '✕ Unlink meeting';
+      clr.onclick = async () => {
+        picker.remove();
+        await saveTag(rid, 'meeting', '');
+      };
+      picker.appendChild(clr);
+    }
+  };
+
+  const cached = _meetingCandCache.get(rid);
+  if (cached && Date.now() - cached.at < _MEETING_CAND_TTL) {
+    render(cached.data);
+    return;
+  }
+
+  render(null);
+  fetch(`/api/recordings/${rid}/meeting-candidates`)
+    .then(r => r.json())
+    .catch(() => null)
+    .then(data => {
+      if (data?.ok) _meetingCandCache.set(rid, { at: Date.now(), data });
+      if (picker.isConnected) render(data);
+    });
+}
+
+/** Patch the card in place after the meeting link changed.
+ *  Deliberately not a full `refreshCard`: re-rendering the card from a chip's
+ *  own click handler destroys the element mid-gesture. */
+function updateMeetingUI(id) {
+  const card = document.querySelector(`.rec-card[data-id="${id}"]`);
+  const rec  = S.recordings.find(r => r.id === id);
+  if (!card || !rec) return;
+
+  const title = card.querySelector('.rec-meeting-name');
+  if (title && document.activeElement !== title) title.textContent = rec.meeting || '';
+
+  const chip = card.querySelector('.rec-meeting-chip');
+  if (chip) {
+    chip.classList.toggle('no-meeting', !rec.meeting);
+    chip.title = rec.meeting ? 'Meeting options' : 'Link this recording to a meeting from that day';
+    const label = chip.querySelector('.rec-meeting-chip-label');
+    if (label) label.textContent = rec.meeting ? 'Meeting' : 'Link meeting';
+  }
+
+  // The Meeting tab appears/disappears with the link
+  if (card.classList.contains('expanded')) refreshExpandedDetail(id);
+}
+
+/** Card chip: expand the card (if needed) and show the Meeting tab. */
+async function openMeetingTab(id) {
+  const card = document.querySelector(`.rec-card[data-id="${id}"]`);
+  if (!card) return;
+  if (!card.classList.contains('expanded')) await toggleCardExpand(id);
+  const btn = document.querySelector(`.rec-card[data-id="${id}"] .detail-tab[data-tab="meeting"]`);
+  if (btn) {
+    switchDetailTab(btn, 'meeting', id);
+    card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+
+async function loadMeetingPanel(id) {
+  const panel = document.querySelector(`.rec-card[data-id="${id}"] .detail-panel[data-tab="meeting"]`);
+  if (!panel || panel.dataset.loaded === '1') return;
+  panel.dataset.loaded = '1';
+
+  let data = _meetingCache.get(id);
+  if (!data) {
+    panel.innerHTML = `<p class="detail-empty">Looking up the meeting in Outlook…</p>`;
+    data = await fetch(`/api/recordings/${id}/meeting`).then(r => r.json()).catch(() => null);
+    // Only cache a real answer — a transient Outlook hiccup should be retryable
+    if (data && (data.ok || data.reason === 'no_match' || data.reason === 'no_meeting')) {
+      _meetingCache.set(id, data);
+    } else {
+      panel.dataset.loaded = '';
+    }
+  }
+  panel.innerHTML = buildMeetingHTML(data);
+}
+
+function buildMeetingHTML(data) {
+  if (!data) return `<p class="detail-empty">Could not reach the server.</p>`;
+  if (!data.ok) {
+    if (data.reason === 'no_meeting') {
+      return `<p class="detail-empty">This recording isn't linked to a meeting yet — type a title above to link one.</p>`;
+    }
+    if (data.reason === 'outlook_unavailable') {
+      return `<p class="detail-empty">${esc(data.error || 'Outlook is not available.')}</p>`;
+    }
+    return `<p class="detail-empty">No Outlook meeting found matching “${esc(data.meeting || '')}”.<br>
+            It may have been deleted, or the title was typed by hand.</p>`;
+  }
+
+  const ev = data.event;
+  const people = s => (s || '').split(';').map(x => x.trim()).filter(Boolean);
+  const when = `${fmtDateOnly(ev.start)} · ${fmtTimeOnly(ev.start)} – ${fmtTimeOnly(ev.end)}`;
+
+  const row = (label, value) => value
+    ? `<div class="detail-mtg-row"><span class="detail-mtg-label">${label}</span>
+         <span class="detail-mtg-value">${esc(value)}</span></div>`
+    : '';
+
+  const attendees = [...people(ev.attendees), ...people(ev.optional_attendees)];
+  const attendeesHTML = attendees.length
+    ? `<div class="detail-mtg-row">
+         <span class="detail-mtg-label">Attendees</span>
+         <span class="detail-mtg-people">${attendees.map(a => `<span class="detail-mtg-person">${esc(a)}</span>`).join('')}</span>
+       </div>`
+    : '';
+
+  // Outlook bodies are padded with long runs of blank lines — collapse them
+  const body = (ev.body || '').replace(/\r\n/g, '\n').replace(/[ \t]+\n/g, '\n')
+                              .replace(/\n{3,}/g, '\n\n').trim();
+  const bodyHTML = body
+    ? `<div class="detail-mtg-body-label">Invitation</div>
+       <div class="detail-mtg-body">${esc(body)}</div>`
+    : '';
+
+  return `
+    <div class="detail-mtg">
+      <div class="detail-mtg-subject">${esc(ev.subject || '')}</div>
+      ${row('When', when)}
+      ${row('Where', ev.location)}
+      ${row('Organizer', ev.organizer)}
+      ${attendeesHTML}
+      ${row('Category', ev.categories)}
+      ${bodyHTML}
+    </div>`;
 }
 
 async function refreshExpandedDetail(id) {
@@ -2279,16 +2568,12 @@ async function ftLoadStats() {
 const DIARIO = { meetings: [], allEvents: null, clockInterval: null };
 let _dState = null;
 let _dViewDate = null;   // Date object (midnight local), null = uninitialised
+let _dUserNavigated = false;  // true once the user picks a date with the arrows
 let _dDragSec = null, _dDragItemId = null, _dDragSecId = null;
-
-const DIARIO_DEFAULT_SECTIONS = [
-  { id: 's_naturgy',  emoji: '⚡', name: 'Naturgy',            items: [] },
-  { id: 's_engie',    emoji: '🔥', name: 'ENGIE',              items: [] },
-  { id: 's_vega',     emoji: '🌌', name: 'Vega',               items: [] },
-  { id: 's_salvador', emoji: '🏠', name: 'Salvador Madariaga', items: [] },
-  { id: 's_personal', emoji: '🙋', name: 'Personal',           items: [] },
-  { id: 's_other',    emoji: '📁', name: 'other',              items: [] },
-];
+let _dFlatDragKey = null;
+let _dFocusDragKey = null;
+const _dOpenNotes = new Set();
+const _dCollapsed = new Set();
 
 const _SEC_COLORS = {
   's_naturgy':  '#f59e0b',
@@ -2307,6 +2592,43 @@ function dSecColor(id) {
 
 function dId() { return Math.random().toString(36).slice(2, 9); }
 
+// Items without a project live in a hidden, headerless section
+const D_LOOSE_ID = 's_loose';
+function _dLooseSec() {
+  let sec = _dState.sections.find(s => s.id === D_LOOSE_ID);
+  if (!sec) {
+    sec = { id: D_LOOSE_ID, emoji: '', name: '', items: [] };
+    _dState.sections.unshift(sec);
+  }
+  return sec;
+}
+
+// Section icons are random and reshuffled every time Home is opened
+const _D_ICON_POOL = ['🚀','🌱','🧩','🎯','🛠️','📐','🧭','💡','🪐','🌊','🍀','🔭','🎨','🧪','📦','🦊','🐙','🌵','🍉','⚙️','🛰️','🗂️','🌋','🧠','🪄','🎲','🏔️','🌙'];
+let _dIcons = new Map();
+let _dIconPool = [];
+function _dShuffleIcons() {
+  _dIcons = new Map();
+  _dIconPool = [..._D_ICON_POOL];
+  for (let i = _dIconPool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [_dIconPool[i], _dIconPool[j]] = [_dIconPool[j], _dIconPool[i]];
+  }
+}
+function dSecIcon(sec) {
+  if (!_dIcons.has(sec.id)) {
+    if (!_dIconPool.length) _dShuffleIcons();
+    _dIcons.set(sec.id, _dIconPool[_dIcons.size % _dIconPool.length]);
+  }
+  return _dIcons.get(sec.id);
+}
+
+// Small, low-contrast project label shown after an item
+function _dSecTag(sec) {
+  if (sec.id === D_LOOSE_ID) return '';
+  return `<span class="d-sec-tag" style="--sec-color:${dSecColor(sec.id)}">${dSecIcon(sec)} ${esc(sec.name)}</span>`;
+}
+
 function _dDateStr(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
@@ -2315,28 +2637,20 @@ function _dIsToday(d) { return _dDateStr(d) === _dDateStr(new Date()); }
 
 async function dLoadState() {
   const dateStr = _dDateStr(_dViewDate);
-  const isToday = _dIsToday(_dViewDate);
-  // Today: try API first (for MCP interop), then localStorage
-  if (isToday) {
-    try {
-      const data = await api('GET', '/api/diario');
-      if (data.state && Array.isArray(data.state.sections)) return data.state;
-    } catch (_) {}
-  }
-  // All dates: localStorage per-day key
+  // The DB is authoritative for every date; it also seeds a fresh day from the
+  // previous day's unfinished items. localStorage is only an offline fallback.
+  try {
+    const data = await api('GET', `/api/diario?date=${dateStr}`);
+    if (data.state && Array.isArray(data.state.sections)) return data.state;
+  } catch (_) {}
   try {
     const raw = localStorage.getItem(`diario_state_${dateStr}`);
     if (raw) {
       const s = JSON.parse(raw);
       if (Array.isArray(s.sections)) return s;
     }
-    // one-time migration from old single-key format
-    if (isToday) {
-      const old = localStorage.getItem('diario_state');
-      if (old) { const s = JSON.parse(old); if (s.date === dateStr && Array.isArray(s.sections)) return s; }
-    }
   } catch (_) {}
-  return { date: dateStr, sections: DIARIO_DEFAULT_SECTIONS.map(s => ({ ...s, items: [] })) };
+  return { date: dateStr, sections: [] };
 }
 
 async function dPersist() {
@@ -2344,23 +2658,21 @@ async function dPersist() {
   const dateStr = _dDateStr(_dViewDate);
   _dState.date  = dateStr;
   try { localStorage.setItem(`diario_state_${dateStr}`, JSON.stringify(_dState)); } catch (_) {}
-  if (_dIsToday(_dViewDate)) {
-    try { await api('PUT', '/api/diario', { state: _dState }); } catch (_) {}
-  }
+  try { await api('PUT', '/api/diario', { date: dateStr, state: _dState }); } catch (_) {}
 }
 
 function dFilterToViewDate() {
   const d0 = _dMidnight(_dViewDate);
   const d1 = new Date(d0); d1.setDate(d0.getDate() + 1);
-  DIARIO.meetings = (DIARIO.allEvents || []).filter(e => {
-    const s = new Date(e.start);
-    return s >= d0 && s < d1;
-  });
+  DIARIO.meetings = (DIARIO.allEvents || [])
+    .filter(e => { const s = new Date(e.start); return s >= d0 && s < d1; })
+    .sort((a, b) => new Date(a.start) - new Date(b.start));
 }
 
 async function dNavDate(delta) {
   _dViewDate = new Date(_dViewDate);
   _dViewDate.setDate(_dViewDate.getDate() + delta);
+  _dUserNavigated = true;
   _dState = await dLoadState();
   dFilterToViewDate();
   dRender();
@@ -2368,6 +2680,7 @@ async function dNavDate(delta) {
 
 async function dGoToday() {
   _dViewDate = _dMidnight(new Date());
+  _dUserNavigated = false;
   _dState = await dLoadState();
   dFilterToViewDate();
   dRender();
@@ -2400,13 +2713,17 @@ function dSortItems(items) {
 
 async function homeInit() {
   if (DIARIO.clockInterval) clearInterval(DIARIO.clockInterval);
-  // Preserve viewed date across page navigations; reset only on first load
-  if (!_dViewDate) _dViewDate = _dMidnight(new Date());
+  // Keep a manually-picked date across page navigations; otherwise follow today,
+  // so reopening Home after midnight lands on the new day rather than yesterday
+  if (!_dViewDate || (!_dUserNavigated && !_dIsToday(_dViewDate))) {
+    _dViewDate = _dMidnight(new Date());
+  }
+  _dShuffleIcons();
   _dState = await dLoadState();
 
-  // Fetch 30-day event window once (refreshed each homeInit)
+  // Fetch 7-days-back + 30-days-forward window once (refreshed each homeInit)
   try {
-    const data = await api('GET', '/api/calendar/events?days=30');
+    const data = await api('GET', '/api/calendar/events?days=30&days_back=7');
     if (data.ok) {
       DIARIO.allEvents = data.events || [];
       // calEvents for recording-page suggestions = today only
@@ -2422,7 +2739,148 @@ async function homeInit() {
   DIARIO.clockInterval = setInterval(() => {
     const el = document.getElementById('d-time');
     if (el) el.textContent = dFmtTime(new Date());
+    // Roll the agenda over at midnight while the app stays open
+    if (!_dUserNavigated && _dViewDate && !_dIsToday(_dViewDate)) dGoToday();
   }, 30000);
+}
+
+function _dSyncFlatOrder() {
+  const existing = new Set();
+  for (const sec of _dState.sections)
+    for (const item of sec.items) existing.add(`${sec.id}:${item.id}`);
+  _dState.flatOrder = (_dState.flatOrder || []).filter(e => existing.has(`${e.secId}:${e.itemId}`));
+  const inOrder = new Set(_dState.flatOrder.map(e => `${e.secId}:${e.itemId}`));
+  for (const sec of _dState.sections)
+    for (const item of sec.items)
+      if (!inOrder.has(`${sec.id}:${item.id}`)) _dState.flatOrder.push({ secId: sec.id, itemId: item.id });
+}
+
+function _dSyncFocusOrder() {
+  const pinned = new Set();
+  for (const sec of _dState.sections)
+    for (const item of sec.items)
+      if (item.pinned) pinned.add(`${sec.id}:${item.id}`);
+  _dState.focusOrder = (_dState.focusOrder || []).filter(e => pinned.has(`${e.secId}:${e.itemId}`));
+  const inOrder = new Set(_dState.focusOrder.map(e => `${e.secId}:${e.itemId}`));
+  for (const key of pinned)
+    if (!inOrder.has(key)) {
+      const [secId, itemId] = key.split(':');
+      _dState.focusOrder.push({ secId, itemId });
+    }
+}
+
+function _dRenderFlat() {
+  _dSyncFlatOrder();
+  const resolved = _dState.flatOrder.map(({ secId, itemId }) => {
+    const sec  = _dState.sections.find(s => s.id === secId);
+    const item = sec?.items.find(i => i.id === itemId);
+    return sec && item ? { sec, item } : null;
+  }).filter(Boolean);
+  if (!resolved.length) return `<div class="d-empty-sec">No items yet</div>`;
+  const sorted = [
+    ...resolved.filter(({ item }) => item.priority && !item.done),
+    ...resolved.filter(({ item }) => !item.priority && !item.done),
+    ...resolved.filter(({ item }) => item.done),
+  ];
+  return `<div class="d-flat-list">${sorted.map(({ sec, item }) => {
+    const pStar = item.priority
+      ? `<span class="d-star d-star-on"  onclick="dPrio('${sec.id}','${item.id}')">★</span>`
+      : `<span class="d-star d-star-off" onclick="dPrio('${sec.id}','${item.id}')">★</span>`;
+    return `<div class="d-row${item.done?' d-done':''}${item.priority?' d-priority':''}" id="dr-${item.id}"
+             draggable="true"
+             ondragstart="dFlatDragStart(event,'${sec.id}','${item.id}')"
+             ondragend="dDragEnd()"
+             ondragover="dFlatDragOver(event)" ondrop="dFlatDrop(event,'${sec.id}','${item.id}')">
+      <span class="d-grip">⠿</span>
+      <span class="d-cb${item.done?' d-cb-on':''}" onclick="dToggle('${sec.id}','${item.id}')"></span>
+      ${pStar}
+      <span class="d-txt" onclick="dEdit(event,'${sec.id}','${item.id}')">${esc(item.text)}</span>
+      ${_dSecTag(sec)}
+      <span class="d-pin${item.pinned ? ' d-pin-on' : ' d-pin-off'}" onclick="dPin('${sec.id}','${item.id}')" title="${item.pinned ? 'Remove from focus' : 'Pin to Today\'s Focus'}">↑</span>
+      <span class="d-note-btn${item.notes ? ' d-note-has' : ''}" onclick="dToggleNote('${item.id}')">≡</span>
+      <span class="d-del" onclick="dDelItem('${sec.id}','${item.id}')">✕</span>
+    </div>${(_dOpenNotes.has(item.id) || item.notes) ? `<textarea class="d-note-ta" id="dnt-${item.id}" rows="2" onblur="dSaveNote(event,'${sec.id}','${item.id}')" onkeydown="if(event.key==='Escape')this.blur()" placeholder="Notes…">${esc(item.notes||'')}</textarea>` : ''}`;
+  }).join('')}</div>`;
+}
+
+function dToggleNote(iid) {
+  if (_dOpenNotes.has(iid)) _dOpenNotes.delete(iid);
+  else _dOpenNotes.add(iid);
+  dRender();
+  if (_dOpenNotes.has(iid)) {
+    const ta = document.getElementById(`dnt-${iid}`);
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  }
+}
+
+function dSaveNote(event, sid, iid) {
+  const sec  = _dState.sections.find(s => s.id === sid);
+  const item = sec?.items.find(i => i.id === iid);
+  if (item) { item.notes = event.target.value; dPersist(); }
+}
+
+function dToggleView() {
+  _dState.flatMode = !_dState.flatMode;
+  if (_dState.flatMode) _dSyncFlatOrder();
+  dPersist(); dRender();
+}
+
+function dFlatDragStart(event, secId, itemId) {
+  if (event.target.closest('.d-cb,.d-star,.d-pin,.d-del,.d-note-btn,textarea')) { event.preventDefault(); return; }
+  _dFlatDragKey = `${secId}:${itemId}`;
+  event.dataTransfer.effectAllowed = 'move';
+  event.currentTarget.classList.add('d-dragging');
+}
+
+function dFlatDragOver(event) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }
+
+function dFlatDrop(event, tgtSecId, tgtItemId) {
+  event.preventDefault();
+  const tgtKey = `${tgtSecId}:${tgtItemId}`;
+  if (!_dFlatDragKey || _dFlatDragKey === tgtKey) { dDragEnd(); return; }
+  const fo = _dState.flatOrder;
+  const fromIdx = fo.findIndex(e => `${e.secId}:${e.itemId}` === _dFlatDragKey);
+  const toIdx   = fo.findIndex(e => `${e.secId}:${e.itemId}` === tgtKey);
+  if (fromIdx === -1 || toIdx === -1) { dDragEnd(); return; }
+  const [moved] = fo.splice(fromIdx, 1);
+  fo.splice(fromIdx < toIdx ? toIdx - 1 : toIdx, 0, moved);
+  dPersist(); dDragEnd(); dRender();
+}
+
+function dFlatAddItem() {
+  const wrap = document.getElementById('d-add-sec-wrap');
+  if (!wrap) return;
+  const secOpts = `<option value="${D_LOOSE_ID}">No project</option>` +
+    _dState.sections.filter(s => s.id !== D_LOOSE_ID).map(s =>
+      `<option value="${s.id}">${dSecIcon(s)} ${esc(s.name)}</option>`
+    ).join('');
+  wrap.innerHTML = `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
+    <select id="d-flat-sel" style="all:unset;font-size:11px;color:var(--muted);background:var(--input);padding:3px 8px;border-radius:4px;border:1px solid var(--border2);cursor:pointer;">${secOpts}</select>
+    <input id="d-flat-inp" style="all:unset;font-family:inherit;font-size:13.5px;color:var(--text);flex:1;background:transparent;border-bottom:1px solid var(--border2);outline:none;" placeholder="New item…"/>
+  </div>`;
+  const inp = document.getElementById('d-flat-inp');
+  inp.focus();
+  let done = false;
+  const confirm = () => {
+    if (done) return; done = true;
+    const t = inp.value.trim();
+    const sid = document.getElementById('d-flat-sel')?.value;
+    if (t && sid) {
+      const sec = sid === D_LOOSE_ID ? _dLooseSec() : _dState.sections.find(s => s.id === sid);
+      if (sec) {
+        const newItem = { id: dId(), text: t, done: false, priority: false };
+        sec.items.push(newItem);
+        _dSyncFlatOrder();
+        dPersist();
+      }
+    }
+    dRender();
+  };
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); confirm(); }
+    if (e.key === 'Escape') dRender();
+  });
+  inp.addEventListener('blur', () => setTimeout(confirm, 80));
 }
 
 function dRender() {
@@ -2461,7 +2919,7 @@ function dRender() {
   const viewDateStr = _dDateStr(_dViewDate);
   const todayRecs = [...S.recordings]
     .filter(r => r.start_time && r.start_time.startsWith(viewDateStr))
-    .sort((a, b) => (b.start_time||'').localeCompare(a.start_time||''));
+    .sort((a, b) => (a.start_time||'').localeCompare(b.start_time||''));
   let grabsHtml = '';
   if (!todayRecs.length) {
     grabsHtml = `<div class="d-empty-hint">No recordings yet today</div>`;
@@ -2486,44 +2944,65 @@ function dRender() {
   }
 
   // ── Pending sections ──
-  const secsHtml = _dState.sections.map(sec => {
-    const color   = dSecColor(sec.id);
-    const sorted  = dSortItems(sec.items);
-    const total   = sec.items.length;
-    const done    = sec.items.filter(i => i.done).length;
-    const open    = total - done;
-    const pct     = total ? Math.round((done / total) * 100) : 0;
-
-    const itemsHtml = sorted.length ? sorted.map(item => {
+  const flatMode = !!_dState.flatMode;
+  // sections with no visible (non-pinned) items go to the end
+  const _dItemRow = (sec, item) => {
       const pStar = item.priority
         ? `<span class="d-star d-star-on"  onclick="dPrio('${sec.id}','${item.id}')">★</span>`
         : `<span class="d-star d-star-off" onclick="dPrio('${sec.id}','${item.id}')">★</span>`;
       return `<div class="d-row${item.done?' d-done':''}${item.priority?' d-priority':''}" id="dr-${item.id}"
+               draggable="true"
+               ondragstart="dDragStart(event,'${sec.id}','${item.id}')"
+               ondragend="dDragEnd()"
                ondragover="dDragOver(event)" ondrop="dDrop(event,'${sec.id}','${item.id}')">
-        <span class="d-grip" draggable="true"
-              ondragstart="dDragStart(event,'${sec.id}','${item.id}')"
-              ondragend="dDragEnd()">⠿</span>
+        <span class="d-grip">⠿</span>
         <span class="d-cb${item.done?' d-cb-on':''}" onclick="dToggle('${sec.id}','${item.id}')"></span>
         ${pStar}
         <span class="d-txt" onclick="dEdit(event,'${sec.id}','${item.id}')">${esc(item.text)}</span>
+        <span class="d-pin${item.pinned ? ' d-pin-on' : ' d-pin-off'}" onclick="dPin('${sec.id}','${item.id}')" title="${item.pinned ? 'Remove from focus' : 'Pin to Today\'s Focus'}">↑</span>
+        <span class="d-note-btn${item.notes ? ' d-note-has' : ''}" onclick="dToggleNote('${item.id}')">≡</span>
         <span class="d-del" onclick="dDelItem('${sec.id}','${item.id}')">✕</span>
-      </div>`;
-    }).join('') : `<div class="d-empty-sec">Nothing here yet</div>`;
+      </div>${(_dOpenNotes.has(item.id) || item.notes) ? `<textarea class="d-note-ta" id="dnt-${item.id}" rows="2" onblur="dSaveNote(event,'${sec.id}','${item.id}')" onkeydown="if(event.key==='Escape')this.blur()" placeholder="Notes…">${esc(item.notes||'')}</textarea>` : ''}`;
+  };
 
-    return `<div class="d-sec" id="ds-${sec.id}" style="--sec-color:${color}"
+  // Items without a project: headerless list above the project sections
+  const looseSec   = _dState.sections.find(s => s.id === D_LOOSE_ID);
+  const looseItems = looseSec ? dSortItems(looseSec.items.filter(i => !i.pinned)) : [];
+  const looseHtml  = looseItems.length
+    ? `<div class="d-loose" ondragover="dDragOver(event)" ondrop="dDrop(event,'${D_LOOSE_ID}',null)">${looseItems.map(i => _dItemRow(looseSec, i)).join('')}</div>`
+    : '';
+
+  const sortedSecs = _dState.sections.filter(s => s.id !== D_LOOSE_ID);
+  const secsHtml = sortedSecs.map(sec => {
+    const color      = dSecColor(sec.id);
+    const visible    = sec.items.filter(i => !i.pinned);
+    const sorted     = dSortItems(visible);
+    const total      = visible.length;
+    const done       = visible.filter(i => i.done).length;
+    const open       = total - done;
+    const pct        = total ? Math.round((done / total) * 100) : 0;
+    const collapsed  = _dCollapsed.has(sec.id);
+
+    const itemsHtml = sorted.length
+      ? sorted.map(item => _dItemRow(sec, item)).join('')
+      : `<div class="d-empty-sec">Nothing here yet</div>`;
+
+    return `<div class="d-sec${collapsed ? ' d-sec-collapsed' : ''}" id="ds-${sec.id}" style="--sec-color:${color}"
              ondragover="dDragOver(event)" ondrop="dDrop(event,'${sec.id}',null)">
-      <div class="d-sh">
-        <span class="d-sec-grip" draggable="true"
-              ondragstart="dSecDragStart(event,'${sec.id}')"
-              ondragend="dSecDragEnd()">⠿</span>
-        <span class="d-emoji">${sec.emoji}</span>
+      <div class="d-sh" draggable="true"
+           ondragstart="dSecDragStart(event,'${sec.id}')"
+           ondragend="dSecDragEnd()"
+           onclick="dToggleSec('${sec.id}')">
+        <span class="d-sec-grip">⠿</span>
+        <span class="d-emoji">${dSecIcon(sec)}</span>
         <span class="d-sname">${esc(sec.name)}</span>
         ${open > 0 ? `<span class="d-count">${open}</span>` : ''}
-        <span class="d-sdel" onclick="dDelSec('${sec.id}')">✕</span>
+        <span class="d-chevron">${collapsed ? '▸' : '▾'}</span>
+        <span class="d-sdel" onclick="event.stopPropagation();dDelSec('${sec.id}')">✕</span>
       </div>
-      <div class="d-rows" id="drows-${sec.id}">${itemsHtml}</div>
+      ${collapsed ? '' : `<div class="d-rows" id="drows-${sec.id}">${itemsHtml}</div>
       ${done > 0 ? `<div class="d-progress"><div class="d-progress-fill" style="width:${pct}%"></div></div>` : ''}
-      <div class="d-add-item" onclick="dAddItem('${sec.id}')">+ item</div>
+      <div class="d-add-item" onclick="dAddItem('${sec.id}')">+ item</div>`}
     </div>`;
   }).join('');
 
@@ -2565,13 +3044,32 @@ function dRender() {
     <div class="d-divider"></div>
 
     <div class="d-agenda-block">
-      <div class="home-section-label">Agenda</div>
-      <div id="d-secs">${secsHtml}</div>
+      <div class="d-agenda-hdr">
+        <div class="home-section-label">Agenda</div>
+        <button class="d-view-toggle" onclick="dToggleView()">${flatMode ? '⊞ sections' : '≡ flat'}</button>
+      </div>
+      ${_dRenderFocus()}
+      <input id="d-quick-add" class="d-quick-add" placeholder="+ Add an item…" onkeydown="dQuickAdd(event)"/>
+      <div id="d-secs">${flatMode ? _dRenderFlat() : looseHtml + secsHtml}</div>
       <div id="d-add-sec-wrap">
-        <span class="d-add-sec" onclick="dAddSec()">+ section</span>
+        ${flatMode
+          ? `<span class="d-add-sec" onclick="dFlatAddItem()">+ item</span>`
+          : `<span class="d-add-sec" onclick="dAddSec()">+ project</span>`}
       </div>
     </div>
     `;
+}
+
+function dQuickAdd(event) {
+  if (event.key === 'Escape') { event.target.value = ''; event.target.blur(); return; }
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  const t = event.target.value.trim();
+  if (!t) return;
+  _dLooseSec().items.push({ id: dId(), text: t, done: false, priority: false });
+  if (_dState.flatMode) _dSyncFlatOrder();
+  dPersist(); dRender();
+  document.getElementById('d-quick-add')?.focus();
 }
 
 function dToggle(sid, iid) {
@@ -2591,10 +3089,72 @@ function dPrio(sid, iid) {
   dPersist(); dRender();
 }
 
+function dPin(sid, iid) {
+  const sec  = _dState.sections.find(s => s.id === sid);
+  const item = sec?.items.find(i => i.id === iid);
+  if (!item) return;
+  item.pinned = !item.pinned;
+  _dSyncFocusOrder();
+  dPersist(); dRender();
+}
+
+function dToggleSec(sid) {
+  if (_dCollapsed.has(sid)) _dCollapsed.delete(sid);
+  else _dCollapsed.add(sid);
+  dRender();
+}
+
+function _dRenderFocus() {
+  _dSyncFocusOrder();
+  const pinned = (_dState.focusOrder || []).map(({ secId, itemId }) => {
+    const sec  = _dState.sections.find(s => s.id === secId);
+    const item = sec?.items.find(i => i.id === itemId);
+    return sec && item ? { sec, item } : null;
+  }).filter(Boolean);
+  const body = pinned.length ? pinned.map(({ sec, item }) => {
+    const noteHtml = item.notes ? `<div class="d-focus-note">${esc(item.notes)}</div>` : '';
+    return `<div class="d-focus-row${item.done ? ' d-focus-done' : ''}"
+             draggable="true"
+             ondragstart="dFocusDragStart(event,'${sec.id}','${item.id}')"
+             ondragend="dDragEnd()"
+             ondragover="dFocusDragOver(event)" ondrop="dFocusDrop(event,'${sec.id}','${item.id}')">
+      <span class="d-grip">⠿</span>
+      <span class="d-cb${item.done ? ' d-cb-on' : ''}" onclick="dToggle('${sec.id}','${item.id}')"></span>
+      <span class="d-txt" onclick="dEdit(event,'${sec.id}','${item.id}')">${esc(item.text)}</span>
+      ${_dSecTag(sec)}
+      <span class="d-focus-unpin" onclick="dPin('${sec.id}','${item.id}')" title="Remove from focus">✕</span>
+    </div>${noteHtml}`;
+  }).join('') : `<div class="d-focus-empty">Pin a task with ↑ to focus on it today</div>`;
+  return `<div class="d-focus-panel"><div class="d-focus-label">🎯 Today's Focus</div>${body}</div>`;
+}
+
+function dFocusDragStart(event, secId, itemId) {
+  if (event.target.closest('.d-cb,.d-focus-unpin,textarea')) { event.preventDefault(); return; }
+  _dFocusDragKey = `${secId}:${itemId}`;
+  event.dataTransfer.effectAllowed = 'move';
+  event.currentTarget.classList.add('d-dragging');
+}
+
+function dFocusDragOver(event) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }
+
+function dFocusDrop(event, tgtSecId, tgtItemId) {
+  event.preventDefault();
+  const tgtKey = `${tgtSecId}:${tgtItemId}`;
+  if (!_dFocusDragKey || _dFocusDragKey === tgtKey) { dDragEnd(); return; }
+  const fo = _dState.focusOrder;
+  const fromIdx = fo.findIndex(e => `${e.secId}:${e.itemId}` === _dFocusDragKey);
+  const toIdx   = fo.findIndex(e => `${e.secId}:${e.itemId}` === tgtKey);
+  if (fromIdx === -1 || toIdx === -1) { dDragEnd(); return; }
+  const [moved] = fo.splice(fromIdx, 1);
+  fo.splice(fromIdx < toIdx ? toIdx - 1 : toIdx, 0, moved);
+  dPersist(); dDragEnd(); dRender();
+}
+
 function dDelItem(sid, iid) {
   const sec = _dState.sections.find(s => s.id === sid);
   if (!sec) return;
   sec.items = sec.items.filter(i => i.id !== iid);
+  if (_dState.flatOrder) _dState.flatOrder = _dState.flatOrder.filter(e => !(e.secId === sid && e.itemId === iid));
   dPersist(); dRender();
 }
 
@@ -2660,18 +3220,16 @@ function dAddSec() {
   const wrap = document.getElementById('d-add-sec-wrap');
   if (!wrap) return;
   wrap.innerHTML = `<div style="display:flex;align-items:center;padding:4px 0;">
-    <input id="d-new-emoji" style="all:unset;font-family:inherit;font-size:20px;color:var(--text);width:28px;background:transparent;border-bottom:1px solid var(--border2);text-align:center;outline:none;" maxlength="2" placeholder="📌"/>
-    <input id="d-new-name"  style="all:unset;font-family:inherit;font-size:13px;color:var(--text);flex:1;background:transparent;border-bottom:1px solid var(--border2);margin-left:10px;outline:none;" placeholder="Section name…"/>
+    <input id="d-new-name" style="all:unset;font-family:inherit;font-size:13px;color:var(--text);flex:1;background:transparent;border-bottom:1px solid var(--border2);outline:none;" placeholder="Project name…"/>
   </div>`;
-  const ei = document.getElementById('d-new-emoji');
   const ni = document.getElementById('d-new-name');
-  ei.focus();
+  ni.focus();
   let done = false;
   const confirm = () => {
     if (done) return; done = true;
     const name = ni.value.trim();
     if (name) {
-      _dState.sections.push({ id: 's_'+dId(), emoji: ei.value.trim()||'📌', name, items: [] });
+      _dState.sections.push({ id: 's_'+dId(), emoji: '', name, items: [] });
       dPersist();
     }
     dRender();
@@ -2680,29 +3238,27 @@ function dAddSec() {
     if (e.key === 'Enter') { e.preventDefault(); confirm(); }
     if (e.key === 'Escape') dRender();
   };
-  ei.addEventListener('keydown', onKey);
   ni.addEventListener('keydown', onKey);
   ni.addEventListener('blur', () => setTimeout(confirm, 80));
 }
 
 function dDragStart(event, sid, iid) {
+  if (event.target.closest('.d-cb,.d-star,.d-pin,.d-del,.d-note-btn,textarea')) { event.preventDefault(); return; }
   _dDragSec = sid; _dDragItemId = iid;
   event.dataTransfer.effectAllowed = 'move';
-  const el = document.getElementById(`dr-${iid}`);
-  if (el) el.classList.add('d-dragging');
+  event.currentTarget.classList.add('d-dragging');
 }
 
 function dDragEnd() {
   document.querySelectorAll('.d-dragging').forEach(e => e.classList.remove('d-dragging'));
-  _dDragSec = null; _dDragItemId = null;
+  _dDragSec = null; _dDragItemId = null; _dFlatDragKey = null; _dFocusDragKey = null;
 }
 
 function dSecDragStart(event, sid) {
+  if (event.target.closest('.d-sdel')) { event.preventDefault(); return; }
   _dDragSecId = sid;
   event.dataTransfer.effectAllowed = 'move';
-  event.stopPropagation();
-  const el = document.getElementById(`ds-${sid}`);
-  if (el) el.classList.add('d-sec-dragging');
+  document.getElementById(`ds-${sid}`)?.classList.add('d-sec-dragging');
 }
 
 function dSecDragEnd() {
@@ -2769,6 +3325,7 @@ function _updateMeetingSuggestions(now) {
     chip.onclick = () => {
       if (input) input.value = suggested.subject;
       chip.style.display = 'none';
+      onPendingTagInput();   // propagate to the server if already recording
     };
   } else {
     chip.style.display = 'none';
@@ -2877,7 +3434,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadRecordings();
   homeInit();
   connectWS();
-  connectChatWS();
   initFocusTime();
   window.electronAPI?.onNavigate?.(name => showPage(name));
+  // Quit only makes sense inside Electron — hidden in browser dev mode.
+  if (window.electronAPI?.quit) document.getElementById('nav-quit-btn').style.display = '';
 });
+
+function quitApp() {
+  // Quitting is safe mid-recording (Electron flushes it via /api/shutdown),
+  // but it ends the recording, so confirm first.
+  if (S.recording && !confirm('A recording is in progress. It will be stopped and saved. Quit anyway?')) return;
+  window.electronAPI?.quit();
+}

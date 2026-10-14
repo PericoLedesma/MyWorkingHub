@@ -22,6 +22,8 @@
 
 9. **`_on_recording_done` must always call `_start_monitor()` and broadcast `recording_stopped`.** These lines must run even if the DB work above them raises. Wrap the DB call in its own try/except so a metadata failure cannot leave the UI permanently stuck on "Recording…".
 
+10. **Pending project/meeting labels live in server state, never in the browser.** `state.pending_project` / `state.pending_meeting` are set by `POST /api/record/start` and `PATCH /api/recording/tags`, and `_on_recording_done` writes them to the DB (own try/except, before the `recording_stopped` broadcast) and then clears them. Never go back to holding the label in JS until the stop event arrives — a UI reload, a WS reconnect, or a stop triggered with no browser attached (MCP, `/api/shutdown`) silently lost it.
+
 ---
 
 ## What This Is
@@ -38,7 +40,11 @@ Electron is purely the shell — it spawns Python as a child process and renders
 launch-widget.bat
 ```
 
-Kills any process on port 8765, ensures `node_modules` is installed, then runs `npm start`. Electron starts, spawns Python (`main.py`), waits for the server, and shows the HUB tab.
+Ensures `node_modules` is installed, then runs `npm start`. Electron starts, spawns Python (`main.py`), waits for the server, and shows the HUB tab.
+
+**Shortcuts (no console window):** `powershell -ExecutionPolicy Bypass -File install-shortcuts.ps1` creates Desktop + Start Menu shortcuts that launch `node_modules\electron\dist\electron.exe .` directly, with `logo\logo.ico` generated from `logo.png`.
+
+**Single instance:** `electron/main.js` takes `app.requestSingleInstanceLock()`; a second launch just expands the running panel. On startup, `clearStaleServer()` handles an orphaned Python on :8765 (left by a crashed Electron) by calling `POST /api/shutdown` first (flushes any recording) and only then killing the PID. Never reintroduce a blind `taskkill /F` on the port — it destroys in-progress recordings.
 
 **Browser-only dev mode** (no Electron):
 ```powershell
@@ -60,7 +66,7 @@ Kills any process on port 8765, ensures `node_modules` is installed, then runs `
 | Variable | Purpose |
 |---|---|
 | `OPENAI_API_KEY` | Post-recording transcription via `whisper-1` |
-| `DEEPSEEK_API_KEY` | Notes and chat via DeepSeek |
+| `DEEPSEEK_API_KEY` | Notes via DeepSeek |
 | `SMART_RECORDER_DATA_DIR` | Data directory (default: `%USERPROFILE%\OneDrive - Accenture\Desktop\MyDB`) |
 | `LIVE_WHISPER_MODEL` | faster-whisper model: `tiny`, `base`, `small` (default), `medium` |
 
@@ -69,8 +75,8 @@ Kills any process on port 8765, ensures `node_modules` is installed, then runs `
 ## Data Storage
 
 Two SQLite databases in `SMART_RECORDER_DATA_DIR`:
-- `smart_recorder.db` — recordings, transcripts, notes, tags, projects
-- `focus_time.db` — Focus Time work sessions
+- `smart_recorder.db` — recordings, transcripts, notes, tags, projects, diario agenda
+- `focus_time.db` — Focus Time work sessions and app-lifecycle events
 
 WAV files live in a `recordings/` subfolder alongside the databases. Schema migrations are additive (`ALTER TABLE ADD COLUMN`, never destructive). Current schema version: **11**.
 
@@ -91,7 +97,7 @@ main.py → uvicorn → FastAPI on :8765
   src/web/server.py       all REST + WebSocket routes (single file)
   src/web/state.py        shared in-process state (WS connections, job sets, level queue)
   src/web/static/         SPA — index.html, app.js, style.css (no bundler)
-  src/db.py               SQLite layer — recordings + projects schema + migrations
+  src/db.py               SQLite layer — recordings, projects, diario schema + migrations
 ```
 
 **Recording card UI (History page — `app.js` `renderCard` / `buildDetailHTML`):**
@@ -100,7 +106,8 @@ main.py → uvicorn → FastAPI on :8765
 - Footer layout: **Transcribe** (primary/indigo when no transcript, with mic SVG icon) on the left; folder icon + trash icon + **Details ▾** pill on the right, separated by a thin vertical rule.
 - Delete button is muted by default; turns red on hover only.
 - Personal notes textarea is **not** in the collapsed card — it lives in the expanded detail panel.
-- Expanded detail panel has **3 tabs in this order**: Notes (default) → Transcript → Speakers.
+- Expanded detail panel has **2 tabs in this order**: Notes (default) → Transcript. A third **Meeting** tab appears only when the recording has a `meeting` label; it lazy-loads the Outlook event on first view.
+- A `📅 Meeting` chip sits next to the project tag when the recording is linked to a meeting. Clicking it expands the card on the Meeting tab. The meeting title itself stays `contenteditable` for renaming, so the chip — not the title — is the details affordance.
 - AI notes generation has been **removed from the History UI**. Notes stored in the DB are not surfaced on the card; generation can only be triggered via the API or MCP (`POST /api/recordings/{rid}/generate-notes`).
 
 **WebSocket `/ws/app`** — real-time event bus from Python to the SPA:
@@ -121,6 +128,9 @@ main.py → uvicorn → FastAPI on :8765
 - `pageChange(name)` — triggers panel width animation
 - `setFocusState(active)` — reflects Focus Time dot on the HUB tab
 - `onNavigate(cb)` — receives navigation commands from the tab
+- `quit()` — quit the app (sidebar **Quit** button; shown only inside Electron)
+
+Closing either window (Alt+F4, taskbar "Close window") quits the whole app via `closeQuitsApp()` in `main.js`. `before-quit` hides the windows, calls `/api/shutdown` (35 s timeout) to flush any recording, then kills Python.
 
 `preload.js` exposes to the tab window:
 - `toggle()` — expand/collapse the panel
@@ -160,19 +170,28 @@ src/agents/
 | `POST` | `/api/recordings/scan` | Rescan folder and return list |
 | `PATCH` | `/api/recordings/{rid}/tags` | Set `project` or `meeting` label |
 | `DELETE` | `/api/recordings/{rid}` | Delete recording + WAV file |
-| `GET` | `/api/recordings/{rid}/transcript` | Full transcript, notes, speaker |
-| `PATCH` | `/api/recordings/{rid}/notes` | Overwrite notes text |
+| `GET` | `/api/recordings/{rid}/transcript` | Full transcript, AI notes, user notes (`{raw, language, notes, user_notes}`) |
+| `PATCH` | `/api/recordings/{rid}/notes` | Overwrite AI notes text |
+| `PATCH` | `/api/recordings/{rid}/user-notes` | Overwrite personal user notes text |
+| `GET` | `/api/recordings/{rid}/meeting` | Outlook details for the linked meeting — matched by subject within ±1 day of the recording. `{ok, event}` or `{ok: false, reason: no_meeting \| no_match \| outlook_unavailable}` |
+| `GET` | `/api/recordings/{rid}/peaks` | Waveform peak data for audio visualization `{peaks, duration, sample_rate, has_backup}` |
+| `POST` | `/api/recordings/{rid}/crop` | Crop audio to `{start, end}` seconds; saves original as `.bak` |
+| `POST` | `/api/recordings/{rid}/restore` | Restore from `.bak` backup after a crop |
 | `POST` | `/api/recordings/{rid}/transcribe` | Trigger Whisper transcription |
 | `POST` | `/api/recordings/{rid}/generate-notes` | Trigger DeepSeek notes |
+| `POST` | `/api/projects/rename` | Rename a project tag across all recordings `{old_name, new_name}` |
 | `GET` | `/api/devices` | List available audio input devices |
 | `GET` | `/api/debug/audio-devices` | All PyAudio + WASAPI loopback devices (for capture diagnostics) |
-| `POST` | `/api/record/start` | Start recording `{source, device_index}` |
+| `POST` | `/api/record/start` | Start recording `{source, device_index, project, meeting}` |
+| `PATCH` | `/api/recording/tags` | Set the in-progress recording's `project` / `meeting` label (applied to the DB on stop) |
 | `POST` | `/api/record/stop` | Stop active recording |
-| `GET` | `/api/recording/status` | Current recording state `{recording, recording_start}` |
+| `GET` | `/api/recording/status` | Current recording state `{recording, recording_start, project, meeting}` |
 | `POST` | `/api/shutdown` | Graceful shutdown — flushes recording before process exits |
 | `POST` | `/api/import` | Import audio file (WAV or ffmpeg-converted) |
 | `GET` | `/audio/{rid}` | Serve WAV file |
 | `GET` | `/api/open_folder/{rid}` | Open file location in Explorer |
+| `POST` | `/api/display/visible` | Electron calls when panel opens — starts audio monitor |
+| `POST` | `/api/display/hidden` | Electron calls when panel closes — stops audio monitor |
 
 **MCP tools** (`mcp/recordings_server.py`):
 
@@ -227,8 +246,10 @@ Tracks work/deep-focus sessions with start/stop/duration. Sessions are stored in
 
 **Source files:**
 ```
-src/focus_db.py   focus_time.db — start_work_session, end_work_session, list_work_sessions
+src/focus_db.py   focus_time.db — start_work_session, end_work_session, list_work_sessions, record_app_start, get_app_events
 ```
+
+**Auto-session:** The server lifespan (`server.py`) calls `focus_db.start_work_session()` on startup and `focus_db.end_work_session()` on shutdown. The current session is tracked in `state.focus_session_id` and returned by `/api/work-sessions/current`. The manual start/stop buttons in the UI create additional sessions on top of this.
 
 **REST API endpoints:**
 
@@ -239,6 +260,7 @@ src/focus_db.py   focus_time.db — start_work_session, end_work_session, list_w
 | `PATCH` | `/api/work-sessions/{id}/end` | End session |
 | `GET` | `/api/work-sessions?date=YYYY-MM-DD` | List sessions, optional date filter |
 | `DELETE` | `/api/work-sessions?date=YYYY-MM-DD` | Delete all sessions on a date |
+| `GET` | `/api/app-events?date=YYYY-MM-DD` | App lifecycle events (start/stop) for a date |
 
 **MCP tools** (`mcp/focus_server.py`):
 
@@ -276,7 +298,7 @@ Reads upcoming meetings from Outlook via COM. Requires desktop Outlook installed
 
 **Source files:**
 ```
-src/outlook.py   COM integration — get_events(days_ahead)
+src/outlook.py   COM integration — get_events(days_ahead, days_back), get_events_between(start, end)
 ```
 
 **REST API endpoints:**
@@ -394,29 +416,17 @@ mcp/teams_server.py   Thin FastMCP wrapper (same pattern as outlook_server.py)
 
 ---
 
-## Service: Chat
-
-Conversational AI over all past recordings. Streaming DeepSeek agent that searches the SQLite database to answer questions about past meetings.
-
-**Source files:**
-```
-src/agents/base.py              BaseAgent — tool-calling loop + streaming
-src/agents/agent_orchestrator.py  ChatAgent — system prompt + buscar_grabaciones tool
-```
-
-**WebSocket:** `/ws/chat` — receives `{text}`, streams back `{type: "token", text}` and `{type: "done"}`.
-
-The chat agent has one tool: `buscar_grabaciones` — full-text search over the `transcript` column in SQLite, returns up to 20 matching recordings with context excerpts. Chat history is kept in `state.chat_history` (in-process, resets on restart).
-
----
-
 ## Service: Diario
 
-Daily agenda (Home page) persisted in `smart_recorder.db`. Each calendar day has one row storing the complete sections/items JSON blob.
+Daily agenda (Home page) persisted in `smart_recorder.db`. Each calendar day has one row storing the complete sections/items JSON blob. Every date — past, present, future — reads and writes through the API; `localStorage` is only an offline fallback cache.
+
+**Day rollover and carry-over:** there are no default sections. A date with **no stored row** inherits the unfinished items of the most recent earlier day (`carry_over_diario`): items with `done: true` are dropped, sections left with no items are dropped, and `priority` / `pinned` / `notes` are preserved. The carried state is **not written** until something edits it, so an unused day keeps inheriting from the same source day. The rollover itself is lazy — `homeInit` re-snaps to today unless the user picked a date with the arrows (`_dUserNavigated`), and the existing 30s clock tick calls `dGoToday()` when the date changes, so an app left open overnight rolls over within 30s of midnight.
+
+`carry_over_diario` is duplicated in `mcp/diario_server.py` as `_carry_over` — the MCP server cannot import `src/db.py` without running `_init()` (schema migrations) in the MCP process. Keep the two in sync.
 
 **Source files:**
 ```
-src/db.py               get_diario, save_diario
+src/db.py               get_diario, save_diario, carry_over_diario
 src/web/server.py       GET/PUT /api/diario endpoints
 mcp/diario_server.py    MCP server (reads DB directly, no app needed)
 src/web/static/app.js   dLoadState/dPersist (async, API-backed)
@@ -426,16 +436,18 @@ src/web/static/app.js   dLoadState/dPersist (async, API-backed)
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/diario` | Return today's agenda state (or null if no row yet) |
-| `PUT` | `/api/diario` | Upsert today's agenda state `{state: {...}}` |
+| `GET` | `/api/diario?date=YYYY-MM-DD` | Agenda for a date (default: today). Null only when no earlier day exists to inherit from. Invalid date → 400 |
+| `PUT` | `/api/diario` | Upsert a date's agenda `{date, state}`; `date` omitted = today. Invalid date → 400 |
 
 **MCP tools** (`mcp/diario_server.py`):
 
 | Tool | Description |
 |---|---|
-| `get_diario(date="")` | Full agenda for a date (default: today). Returns sections + items. |
-| `add_item(section_id, text, priority=False)` | Add a todo to a section for today. |
+| `get_diario(date="")` | Full agenda for a date (default: today). Returns sections + items (including `pinned` and `notes` fields). A date with no row inherits the last day's unfinished items. |
+| `add_item(text, section_id="", priority=False, pinned=False, notes="")` | Add a todo for today. Empty `section_id` = no project (hidden `s_loose` section). |
 | `complete_item(section_id, item_id, done=True)` | Toggle an item's done state. |
+| `pin_item(section_id, item_id, pinned=True)` | Pin/unpin an item in Today's Focus panel. |
+| `set_item_notes(section_id, item_id, notes)` | Set per-item notes text (empty string to clear). |
 | `delete_item(section_id, item_id)` | Remove an item from today. |
 | `add_section(emoji, name)` | Add a new section to today. |
 | `delete_section(section_id)` | Remove a section (and all its items) from today. |
@@ -444,7 +456,7 @@ src/web/static/app.js   dLoadState/dPersist (async, API-backed)
 
 ## MCP Registration (Claude Desktop)
 
-Each service is a separate MCP server. Add all eight to `claude_desktop_config.json`. Note: Jiggler has no MCP server (UI-only feature).
+Each service is a separate MCP server. Add all nine to `claude_desktop_config.json`. Note: Jiggler has no MCP server (UI-only feature).
 
 **Config file location:**
 ```
@@ -485,6 +497,10 @@ Each service is a separate MCP server. Add all eight to `claude_desktop_config.j
     "hub-teams": {
       "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
       "args": ["C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\mcp\\teams_server.py"]
+    },
+    "hub-diario": {
+      "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\mcp\\diario_server.py"]
     }
   }
 }

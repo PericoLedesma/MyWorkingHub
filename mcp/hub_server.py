@@ -78,8 +78,8 @@ def list_mcp_services() -> str:
             "description": "Browse, search, transcribe, annotate recordings, and control live recording (reads SQLite + calls app API).",
             "tools": [
                 "list_recordings — browse with date/project/meeting filters",
-                "get_recording — full detail: transcript, summary, notes",
-                "search_recordings — keyword search across transcripts and summaries",
+                "get_recording — full detail: transcript, notes, speaker data",
+                "search_recordings — keyword search across transcripts and notes (include_notes flag)",
                 "transcribe_recording — run Whisper-1 on a WAV file",
                 "write_notes — persist notes to the database",
                 "launch_app — start the SmartRecorder Electron app",

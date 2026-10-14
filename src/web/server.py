@@ -19,7 +19,6 @@ from src import db, focus_db
 from src.recorder import Recorder, list_input_devices, FOLDER
 from src.transcriber import Transcriber
 from src.live_transcriber import LiveTranscriber
-from src.agents.agent_orchestrator import ChatAgent
 from src.agents.agent_notes import NotesAgent
 from src.jiggler import MouseJiggler
 from src.web import state
@@ -33,7 +32,6 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 _transcriber = Transcriber()
 _live_transcriber = LiveTranscriber()
-_chat_agent = ChatAgent()
 _notes_agent = NotesAgent()
 _jiggler = MouseJiggler()
 
@@ -69,11 +67,20 @@ async def _on_recording_done(meta: dict | None, reason: str | None) -> None:
             db.save_transcript_speaker(meta["id"], live_tx)
         except Exception:
             log.exception("Failed to save live transcript for recording %s", meta["id"])
-    state.live_segments = []
-
-    # Always restart monitor and broadcast even if DB work above failed —
-    # otherwise the UI stays stuck showing "Recording…" with no way to recover.
-    _start_monitor()
+    # Apply the project / meeting labels chosen before or during the recording.
+    # Own try/except: a tag failure must never stop the broadcast below.
+    if meta:
+        for field in ("project", "meeting"):
+            value = (state.pending_project if field == "project" else state.pending_meeting).strip()
+            if not value:
+                continue
+            try:
+                db.update_tag(meta["id"], field, value)
+                meta[field] = value
+            except Exception:
+                log.exception("Failed to save %s=%r for recording %s", field, value, meta["id"])
+    state.pending_project = ""
+    state.pending_meeting = ""
 
     if meta:
         await state.broadcast({"type": "recording_stopped", "meta": _rec_to_dict(meta)})
@@ -106,61 +113,11 @@ def _notes_done_cb(recording_id: int, notes: str | None) -> None:
     asyncio.run_coroutine_threadsafe(_cb(), state.loop)
 
 
-def _start_monitor() -> None:
-    """Start a level-only monitor (no recording) in a daemon thread.
-
-    No-ops when the panel is hidden — avoids burning CPU on WASAPI callbacks
-    and NumPy RMS computations while nobody is watching the VU meters.
-    """
-    if not state.panel_visible:
-        return
-    if state.monitor_stop:
-        return  # already running
-    ev = threading.Event()
-    state.monitor_stop = ev
-    r = Recorder(
-        stop_event=ev,
-        set_mic_level=state.set_mic_level,
-        set_app_level=state.set_app_level,
-        on_done=lambda *_: None,
-    )
-    t = threading.Thread(target=r.monitor, args=(ev,), daemon=True)
-    state.monitor_thread = t
-    t.start()
-
-
-def _stop_monitor() -> None:
-    if state.monitor_stop:
-        state.monitor_stop.set()
-        state.monitor_stop = None
-    if state.monitor_thread:
-        # Must join before returning: monitor holds WASAPI loopback handles, and recording
-        # opening the same device while the monitor still owns it produces a dead stream
-        # (audio bar goes silent). See Recording Integrity Rule 6 in CLAUDE.md.
-        state.monitor_thread.join(timeout=2)
-        state.monitor_thread = None
-
-
 # ── Lifespan ─────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     state.init(asyncio.get_running_loop())
-
-    async def _level_broadcaster():
-        while True:
-            try:
-                msg = await asyncio.wait_for(state.level_queue.get(), timeout=1.0)
-                await state.broadcast(msg)
-            except asyncio.TimeoutError:
-                pass
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                await asyncio.sleep(0.05)
-
-    task = asyncio.create_task(_level_broadcaster())
-    _start_monitor()
 
     sess = focus_db.start_work_session()
     state.focus_session_id = sess["id"]
@@ -169,12 +126,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    _stop_monitor()
     if state.stop_event:
         state.stop_event.set()
     if state.recording_thread and state.recording_thread.is_alive():
@@ -244,7 +195,6 @@ def get_transcript(rid: int):
     return {
         "raw": db.get_transcript_raw(rid),
         "language": db.get_language(rid),
-        "speaker": db.get_transcript_speaker(rid),
         "notes": db.get_notes(rid),
         "user_notes": db.get_user_notes(rid),
     }
@@ -356,6 +306,8 @@ def debug_audio_devices():
 class RecordStart(BaseModel):
     source: str          # "mic" | "app" | "both"
     device_index: int | None = None
+    project: str = ""
+    meeting: str = ""
 
 
 @app.post("/api/record/start")
@@ -363,17 +315,15 @@ async def record_start(body: RecordStart):
     if state.recording:
         return {"ok": False, "reason": "already_recording"}
 
-    _stop_monitor()
-
     stop_ev = threading.Event()
     state.stop_event = stop_ev
     state.recording = True
     state.recording_start = time.time()
+    state.pending_project = (body.project or "").strip()
+    state.pending_meeting = (body.meeting or "").strip()
 
     rec = Recorder(
         stop_event=stop_ev,
-        set_mic_level=state.set_mic_level,
-        set_app_level=state.set_app_level,
         on_done=lambda meta, reason: asyncio.run_coroutine_threadsafe(
             _on_recording_done(meta, reason), state.loop
         ),
@@ -403,8 +353,36 @@ async def record_start(body: RecordStart):
         "type": "recording_started",
         "source": body.source,
         "start_time": state.recording_start,
+        "project": state.pending_project,
+        "meeting": state.pending_meeting,
     })
     return {"ok": True}
+
+
+class PendingTags(BaseModel):
+    project: str | None = None
+    meeting: str | None = None
+
+
+@app.patch("/api/recording/tags")
+async def update_pending_tags(body: PendingTags):
+    """Set the project / meeting labels for the in-progress recording.
+
+    Lets the user pick or change the meeting *while* recording; the labels are
+    written to the DB when the recording stops.
+    """
+    if not state.recording:
+        return {"ok": False, "reason": "not_recording"}
+    if body.project is not None:
+        state.pending_project = body.project.strip()
+    if body.meeting is not None:
+        state.pending_meeting = body.meeting.strip()
+    await state.broadcast({
+        "type": "recording_tags",
+        "project": state.pending_project,
+        "meeting": state.pending_meeting,
+    })
+    return {"ok": True, "project": state.pending_project, "meeting": state.pending_meeting}
 
 
 @app.post("/api/record/stop")
@@ -436,6 +414,8 @@ def recording_status():
     return {
         "recording": state.recording,
         "recording_start": state.recording_start,
+        "project": state.pending_project,
+        "meeting": state.pending_meeting,
     }
 
 
@@ -698,37 +678,20 @@ def jiggler_status():
     return {"running": _jiggler.running}
 
 
-# ── REST: display visibility (Electron panel open/close) ─────────────────────
-
-@app.post("/api/display/visible")
-def display_visible():
-    """Electron calls this when the panel expands — start audio monitoring."""
-    state.panel_visible = True
-    if not state.recording:
-        _start_monitor()
-    return {"ok": True}
-
-
-@app.post("/api/display/hidden")
-def display_hidden():
-    """Electron calls this when the panel collapses — stop audio monitoring."""
-    state.panel_visible = False
-    if not state.recording:
-        _stop_monitor()
-    return {"ok": True}
-
-
 # ── WebSocket: /ws/app ────────────────────────────────────────────────────────
 
 @app.websocket("/ws/app")
 async def ws_app(ws: WebSocket):
     await ws.accept()
     state.add_ws(ws)
+    log.info("ws_app: CONNECTED  — active_watchers=%d", state.count_watchers())
     try:
         await ws.send_text(json.dumps({
             "type": "init",
             "recording": state.recording,
             "recording_start": state.recording_start,
+            "project": state.pending_project,
+            "meeting": state.pending_meeting,
             "transcribing": list(state.transcribing),
             "notes_generating": list(state.notes_generating),
         }))
@@ -740,73 +703,18 @@ async def ws_app(ws: WebSocket):
         pass
     finally:
         state.remove_ws(ws)
-
-
-# ── WebSocket: /ws/chat ───────────────────────────────────────────────────────
-
-@app.websocket("/ws/chat")
-async def ws_chat(ws: WebSocket):
-    await ws.accept()
-    try:
-        while True:
-            raw = await ws.receive_text()
-            data = json.loads(raw)
-            user_text = (data.get("text") or "").strip()
-            if not user_text:
-                continue
-
-            state.chat_history.append({"role": "user", "content": user_text})
-
-            messages = [
-                {"role": "system", "content": _chat_agent.system_prompt},
-                *state.chat_history,
-            ]
-            tool_handlers = {"buscar_grabaciones": lambda c: db.search_transcripts(c)}
-
-            token_q: asyncio.Queue = asyncio.Queue()
-            ev_loop = state.loop
-
-            def on_token(text: str):
-                ev_loop.call_soon_threadsafe(
-                    token_q.put_nowait, {"type": "token", "text": text}
-                )
-
-            def on_done(final: str | None):
-                ev_loop.call_soon_threadsafe(
-                    token_q.put_nowait, {"type": "done", "text": final or ""}
-                )
-
-            _chat_agent.run_stream_async(messages, tool_handlers, on_token, on_done)
-
-            # Stream tokens to the browser and collect full response
-            full: list[str] = []
-            while True:
-                msg = await token_q.get()
-                await ws.send_text(json.dumps(msg))
-                if msg["type"] == "token":
-                    full.append(msg["text"])
-                elif msg["type"] == "done":
-                    if not full and msg["text"]:
-                        full.append(msg["text"])
-                    break
-
-            state.chat_history.append({"role": "assistant", "content": "".join(full)})
-
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        log.exception("Chat WebSocket error")
+        log.info("ws_app: DISCONNECTED — active_watchers=%d", state.count_watchers())
 
 
 # ── REST: Outlook calendar ────────────────────────────────────────────────────
 
 @app.get("/api/calendar/events")
-async def calendar_events(days: int = 1):
+async def calendar_events(days: int = 1, days_back: int = 0):
     import asyncio
     from src.outlook import get_events
     try:
         events = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: get_events(days_ahead=days)
+            None, lambda: get_events(days_ahead=days, days_back=days_back)
         )
         return {"ok": True, "events": events}
     except Exception as e:
@@ -817,23 +725,153 @@ async def calendar_events(days: int = 1):
         return {"ok": False, "error": err, "events": []}
 
 
+def _match_meeting(events: list[dict], label: str, rec_start: datetime.datetime) -> dict | None:
+    """Pick the calendar event a recording's meeting label refers to.
+
+    The DB only stores the subject text, so the event is recovered by subject and
+    by how close it sits to the moment the recording started.
+    """
+    want = label.strip().casefold()
+
+    def _dist(ev: dict) -> float:
+        try:
+            ev_start = datetime.datetime.fromisoformat(ev["start"])
+        except Exception:
+            return float("inf")
+        return abs((ev_start - rec_start).total_seconds())
+
+    exact = [e for e in events if (e.get("subject") or "").strip().casefold() == want]
+    if exact:
+        return min(exact, key=_dist)
+
+    partial = [
+        e for e in events
+        if want and (want in (e.get("subject") or "").casefold()
+                     or (e.get("subject") or "").strip().casefold() in want)
+    ]
+    if partial:
+        return min(partial, key=_dist)
+    return None
+
+
+def _recording_span(rid: int) -> tuple[dict, datetime.datetime, datetime.datetime]:
+    """Return (recording, start, end) or raise 404."""
+    rec = next((r for r in db.load_metadata(FOLDER) if r["id"] == rid), None)
+    if rec is None:
+        raise HTTPException(404, "recording not found")
+
+    def _dt(value) -> datetime.datetime:
+        return value if isinstance(value, datetime.datetime) else datetime.datetime.fromisoformat(str(value))
+
+    return rec, _dt(rec["start_time"]), _dt(rec["end_time"])
+
+
+@app.get("/api/recordings/{rid}/meeting-candidates")
+async def recording_meeting_candidates(rid: int):
+    """The Outlook meetings on the day a recording was made, for the card picker.
+
+    `overlap` marks the events whose time range intersects the recording, which
+    is almost always the one the user wants.
+    """
+    import asyncio
+    from src.outlook import get_events_between
+
+    rec, rec_start, rec_end = _recording_span(rid)
+    day = rec_start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    try:
+        events = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: get_events_between(day, day + datetime.timedelta(days=1), body_chars=0),
+        )
+    except Exception as e:
+        log.warning("Meeting candidates lookup failed for recording %s: %s", rid, e)
+        return {"ok": False, "reason": "outlook_unavailable", "events": [],
+                "error": "Could not connect to Outlook. Make sure Outlook (classic) is open."}
+
+    out = []
+    for ev in events:
+        try:
+            ev_start = datetime.datetime.fromisoformat(ev["start"])
+            ev_end   = datetime.datetime.fromisoformat(ev["end"])
+        except Exception:
+            continue
+        out.append({
+            "subject":   ev.get("subject", ""),
+            "start":     ev["start"],
+            "end":       ev["end"],
+            "location":  ev.get("location", ""),
+            "organizer": ev.get("organizer", ""),
+            "overlap":   ev_start < rec_end and rec_start < ev_end,
+        })
+    out.sort(key=lambda e: e["start"])
+    return {"ok": True, "date": day.strftime("%Y-%m-%d"),
+            "current": (rec.get("meeting") or "").strip(), "events": out}
+
+
+@app.get("/api/recordings/{rid}/meeting")
+async def recording_meeting(rid: int):
+    """Outlook details for the meeting a recording is linked to.
+
+    Matching is best-effort: the recording stores only the meeting's subject, so
+    the event is found by subject within a +/- 1 day window around the recording.
+    """
+    import asyncio
+    from src.outlook import get_events_between
+
+    rec, rec_start, _ = _recording_span(rid)
+
+    label = (rec.get("meeting") or "").strip()
+    if not label:
+        return {"ok": False, "reason": "no_meeting"}
+
+    day = rec_start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    try:
+        events = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: get_events_between(
+                day - datetime.timedelta(days=1),
+                day + datetime.timedelta(days=2),
+                body_chars=4000,
+            ),
+        )
+    except Exception as e:
+        log.warning("Meeting lookup failed for recording %s: %s", rid, e)
+        return {"ok": False, "reason": "outlook_unavailable", "meeting": label,
+                "error": "Could not connect to Outlook. Make sure Outlook (classic) is open."}
+
+    event = _match_meeting(events, label, rec_start)
+    if event is None:
+        return {"ok": False, "reason": "no_match", "meeting": label}
+    return {"ok": True, "meeting": label, "event": event}
+
+
 # ── REST: Diario ─────────────────────────────────────────────────────────────
 
 class DiarioBody(BaseModel):
     state: dict
+    date: str = ""
+
+
+def _diario_date(date: str) -> str:
+    """Validate a YYYY-MM-DD date, defaulting to today when empty."""
+    if not date:
+        return datetime.date.today().isoformat()
+    try:
+        return datetime.date.fromisoformat(date).isoformat()
+    except ValueError:
+        raise HTTPException(400, f"Invalid date '{date}'. Use YYYY-MM-DD.")
 
 
 @app.get("/api/diario")
-def get_diario_endpoint():
-    today = datetime.date.today().isoformat()
-    state_data = db.get_diario(today)
-    return {"ok": True, "state": state_data}
+def get_diario_endpoint(date: str = ""):
+    return {"ok": True, "state": db.get_diario(_diario_date(date))}
 
 
 @app.put("/api/diario")
 def save_diario_endpoint(body: DiarioBody):
-    today = datetime.date.today().isoformat()
-    db.save_diario(today, body.state)
+    db.save_diario(_diario_date(body.date), body.state)
     return {"ok": True}
 
 

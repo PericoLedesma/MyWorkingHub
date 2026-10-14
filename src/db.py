@@ -593,13 +593,46 @@ def delete_project(pid: int) -> None:
 
 # ── Diario ────────────────────────────────────────────────────────────────────
 
+def carry_over_diario(prev: dict, date: str) -> dict:
+    """Seed a fresh day from the previous day's unfinished items.
+
+    Kept in sync with the same function in mcp/diario_server.py, which cannot
+    import this module without triggering _init() in the MCP process.
+    """
+    sections = []
+    for sec in prev.get("sections", []):
+        items = [{**i, "done": False} for i in sec.get("items", []) if not i.get("done")]
+        if items:
+            sections.append({**sec, "items": items})
+    state = {"date": date, "sections": sections}
+    alive = {(s["id"], i["id"]) for s in sections for i in s["items"]}
+    order = [e for e in prev.get("flatOrder", [])
+             if (e.get("secId"), e.get("itemId")) in alive]
+    if order:
+        state["flatOrder"] = order
+    if prev.get("flatMode"):
+        state["flatMode"] = True
+    return state
+
+
 def get_diario(date: str) -> dict | None:
-    """Return the parsed diario state for the given YYYY-MM-DD date, or None."""
+    """Return the diario state for a YYYY-MM-DD date.
+
+    A date with no stored row inherits the unfinished items of the most recent
+    earlier day. The carried state is not written until something edits it.
+    Returns None when no earlier day exists either.
+    """
     with sqlite3.connect(DB_PATH) as conn:
         row = conn.execute(
             "SELECT state FROM diario WHERE date = ?", (date,)
         ).fetchone()
-    return json.loads(row[0]) if row else None
+        if row:
+            return json.loads(row[0])
+        prev = conn.execute(
+            "SELECT state FROM diario WHERE date < ? ORDER BY date DESC LIMIT 1",
+            (date,),
+        ).fetchone()
+    return carry_over_diario(json.loads(prev[0]), date) if prev else None
 
 
 def save_diario(date: str, state: dict) -> None:

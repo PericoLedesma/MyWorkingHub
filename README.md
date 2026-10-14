@@ -1,6 +1,6 @@
 # My Working Hub
 
-A Windows desktop productivity widget that lives on the right edge of your screen. Records meetings, transcribes with AI, tracks focus time, integrates with Outlook, OneNote, and Teams, and lets you chat with your entire meeting history — all from a slide-in panel triggered by the **HUB** tab.
+A Windows desktop productivity widget that lives on the right edge of your screen. Records meetings, transcribes with AI, tracks focus time, integrates with Outlook, OneNote, and Teams — all from a slide-in panel triggered by the **HUB** tab.
 
 ---
 
@@ -26,7 +26,7 @@ npm install
 | Variable | Purpose |
 |---|---|
 | `OPENAI_API_KEY` | Post-recording transcription via Whisper |
-| `DEEPSEEK_API_KEY` | Summaries, notes, and chat via DeepSeek |
+| `DEEPSEEK_API_KEY` | Notes via DeepSeek |
 
 **Data directory** — recordings and databases are stored in:
 ```
@@ -54,9 +54,11 @@ Kills any process on port 8765, installs Node modules if needed, and launches th
 
 ## Tabs
 
-### Home
+### Home (Diario)
 
-The dashboard. Shows a live focus timer, a count of this month's recordings, and today's upcoming calendar events. Quick-action buttons jump to Recordings, Chat, Calendar, and Focus Time.
+The daily agenda dashboard. Shows a live focus timer, this month's recording count, and today's upcoming calendar events. A persistent agenda section lets you add, complete, and delete todo items organized into named sections — state is saved automatically and survives restarts.
+
+Quick-action buttons jump to Recordings, Calendar, and Focus Time.
 
 ---
 
@@ -68,9 +70,7 @@ Control panel for capturing audio.
 2. Optionally select an input device from the dropdown
 3. Tag the recording with a **Project** and **Meeting** name before or after recording
 4. Hit **Record** — VU meters and a live transcript appear in real-time
-5. Hit **Stop** — the WAV file is saved, then the pipeline runs automatically:
-   - Whisper API transcription
-   - DeepSeek bullet notes (action items, key points, decisions)
+5. Hit **Stop** — the WAV file is saved, then Whisper transcription runs automatically
 
 You can also **import** an existing audio file (WAV, or any format if ffmpeg is installed) to run it through the same transcription pipeline.
 
@@ -80,7 +80,7 @@ You can also **import** an existing audio file (WAV, or any format if ffmpeg is 
 |---|---|
 | Live transcription (during recording) | faster-whisper `small` — runs locally, no API cost |
 | Post-recording transcription | OpenAI `whisper-1` |
-| Notes | DeepSeek `deepseek-chat` |
+| Notes | DeepSeek `deepseek-chat` (via API or MCP only) |
 
 ---
 
@@ -93,39 +93,15 @@ Browse all past recordings as cards. Each card shows:
 
 Cards are centered and capped at 780 px wide so they never stretch edge-to-edge.
 
-Expanding a card opens a three-tab detail panel:
+Expanding a card opens a two-tab detail panel:
 1. **Notes** (active by default) — personal notes textarea, auto-saved on blur
 2. **Transcript** — full Whisper transcript
-3. **Speakers** — diarized speaker transcript (when available)
 
 A timeline bar at the top shows all recordings grouped by month as colored dots — click any dot to jump to that recording.
 
 Cards can be filtered by project, date range, or keyword search.
 
----
-
-### Projects
-
-Organize recordings under named projects. Each project has:
-- Name, description, status (`Active` / `On Hold` / `Done`)
-- Client, objective
-- Phases and streams (list tags)
-- Color label
-
-Recordings can be linked to a project from the History card or from the Recordings tab before/after a session. Projects also track total recorded time and recording count.
-
----
-
-### Chat
-
-Ask questions across all your past recordings. The AI searches transcripts and notes in SQLite and answers in a streaming conversational style.
-
-Examples:
-- *"What did we decide about the API redesign last week?"*
-- *"What were the action items from the Alpha project this month?"*
-- *"Who was mentioned in yesterday's standup?"*
-
-Chat history persists within a session and resets when the app restarts.
+> **Note:** AI notes generation is not available in the History UI. Notes can only be triggered via the API (`POST /api/recordings/{rid}/generate-notes`) or Claude Desktop MCP (`write_notes`).
 
 ---
 
@@ -192,6 +168,10 @@ My Working Hub exposes one MCP server per service. Most read SQLite directly or 
       "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
       "args": ["C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\mcp\\calendar_server.py"]
     },
+    "hub-outlook": {
+      "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\mcp\\outlook_server.py"]
+    },
     "hub-onenote": {
       "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
       "args": ["C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\mcp\\onenote_server.py"]
@@ -199,6 +179,10 @@ My Working Hub exposes one MCP server per service. Most read SQLite directly or 
     "hub-teams": {
       "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
       "args": ["C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\mcp\\teams_server.py"]
+    },
+    "hub-diario": {
+      "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\mcp\\diario_server.py"]
     },
     "hub-meta": {
       "command": "C:\\Users\\p.ledesma.jimenez\\scripts\\SmartRecorder\\.venv\\Scripts\\python.exe",
@@ -213,8 +197,8 @@ My Working Hub exposes one MCP server per service. Most read SQLite directly or 
 | Service | Server | Tool | App required? | Description |
 |---|---|---|---|---|
 | **Recordings** | `hub-recordings` | `list_recordings` | No | Browse with date/project/meeting filters |
-| | | `get_recording` | No | Full detail: transcript, summary, notes, speakers |
-| | | `search_recordings` | No | Keyword search across transcripts and summaries |
+| | | `get_recording` | No | Full detail: transcript, notes, speakers |
+| | | `search_recordings` | No | Keyword search across transcripts and notes (`include_notes` flag) |
 | | | `transcribe_recording` | Yes | Run Whisper-1 on a WAV file and save the transcript |
 | | | `write_notes` | No | Persist notes to the database |
 | | | `launch_app` | No | Launch the Electron desktop app |
@@ -228,6 +212,8 @@ My Working Hub exposes one MCP server per service. Most read SQLite directly or 
 | **Focus Time** | `hub-focus` | `get_focus_stats` | No | Daily focus hours and session counts (last 30 days) |
 | | | `get_work_sessions` | No | Individual sessions with start/end times, filterable by date |
 | **Calendar** | `hub-calendar` | `get_calendar_events` | No* | Upcoming Outlook meetings (*requires desktop Outlook) |
+| **Outlook Email** | `hub-outlook` | `get_emails` | No* | Most recent inbox emails; `count` param (default 20), newest first |
+| | | `get_unread_emails` | No* | Unread inbox emails only; `count` param (default 20) |
 | **OneNote** | `hub-onenote` | `get_onenote_hierarchy` | No* | Notebooks → sections → pages with IDs |
 | | | `get_page_content` | No* | Read text content of a page by ID |
 | | | `create_page` | No* | Create a page in the first available section |
@@ -245,6 +231,12 @@ My Working Hub exposes one MCP server per service. Most read SQLite directly or 
 | | | `teams_list_channels` | No | List channels in a Team |
 | | | `teams_get_presence` | No | Current availability / activity status |
 | | | `teams_send_message` | No | Send a message to a chat |
+| **Diario** | `hub-diario` | `get_diario` | No | Full agenda for a date (default: today) |
+| | | `add_item` | No | Add a todo item to a section |
+| | | `complete_item` | No | Toggle an item's done state |
+| | | `delete_item` | No | Remove an item from today |
+| | | `add_section` | No | Add a new section to today |
+| | | `delete_section` | No | Remove a section and all its items |
 | **Hub Meta** | `hub-meta` | `get_readme` | No | Return the full README.md content |
 | | | `update_readme` | No | Overwrite README.md with new content |
 | | | `get_dev_context` | No | Return CLAUDE.md (architecture and dev notes) |
@@ -270,19 +262,18 @@ SmartRecorder/
 │   ├── preload.js              IPC bridge for the tab window
 │   └── app-preload.js          IPC bridge for the main app window
 ├── src/
-│   ├── db.py                   SQLite — recordings, projects, schema migrations
+│   ├── db.py                   SQLite — recordings, projects, diario, schema migrations
 │   ├── focus_db.py             SQLite — Focus Time sessions
 │   ├── recorder.py             Audio capture (PyAudioWPatch, WASAPI loopback)
 │   ├── transcriber.py          Post-recording Whisper API transcription
 │   ├── live_transcriber.py     Real-time faster-whisper (every 5s)
-│   ├── outlook.py              Outlook COM integration
+│   ├── outlook.py              Outlook COM integration (calendar + email)
 │   ├── onenote.py              OneNote COM integration
 │   ├── teams.py                Teams Graph API + Windows WAM auth
 │   ├── jiggler.py              Mouse jiggler utility
 │   ├── agents/
 │   │   ├── base.py             BaseAgent — tool-calling loop + streaming
-│   │   ├── agent_notes.py      NotesAgent (DeepSeek, tool: guardar_notas)
-│   │   └── agent_orchestrator.py  ChatAgent (buscar_grabaciones tool)
+│   │   └── agent_notes.py      NotesAgent (DeepSeek, tool: guardar_notas)
 │   └── web/
 │       ├── server.py           FastAPI app — all REST + WebSocket routes
 │       ├── state.py            Shared in-process state (WS connections, queues)
@@ -295,8 +286,10 @@ SmartRecorder/
     ├── projects_server.py      MCP — list/create/update projects
     ├── focus_server.py         MCP — focus stats and work sessions
     ├── calendar_server.py      MCP — Outlook calendar events (COM)
+    ├── outlook_server.py       MCP — Outlook inbox email (COM)
     ├── onenote_server.py       MCP — OneNote hierarchy and page ops (COM)
     ├── teams_server.py         MCP — Teams chats, messages, presence (Graph API)
+    ├── diario_server.py        MCP — daily agenda (read DB directly)
     ├── hub_server.py           MCP — hub meta: README, dev context, service catalogue
     └── tools.md                Tool catalogue and candidate tools
 ```

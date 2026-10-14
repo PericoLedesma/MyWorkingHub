@@ -7,7 +7,7 @@
 
     html, body {
       width: 48px;
-      height: 260px;
+      height: 274px;
       overflow: hidden;
       background: transparent;
     }
@@ -30,7 +30,7 @@
     /* ── Single outer shell ── */
     .shell {
       width: 48px;
-      height: 260px;
+      height: 274px;
       display: flex;
       flex-direction: column;
       background: linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
@@ -110,6 +110,8 @@
       transition: color .3s;
     }
     .rec.on .rec-label { color: #f87171; letter-spacing: .5px; }
+    .rec.err .rec-label { color: var(--amber); letter-spacing: 1px; }
+    .rec.err .rec-dot { background: var(--amber); box-shadow: 0 0 8px rgba(245,158,11,.6); animation: none; }
 
     @keyframes blink { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.45;transform:scale(.78)} }
 
@@ -122,6 +124,19 @@
       color: var(--amber);
       filter: drop-shadow(0 0 5px rgba(245,158,11,.72));
     }
+
+    /* ── Thin / collapsed mode ── */
+    .shell.thin {
+      cursor: pointer;
+      border-color: rgba(99,102,241,.5);
+      box-shadow: -3px 0 16px rgba(99,102,241,.35);
+      transition: box-shadow .2s, border-color .2s;
+    }
+    .shell.thin:hover {
+      border-color: var(--indigo);
+      box-shadow: -4px 0 24px rgba(99,102,241,.65);
+    }
+    .shell.thin .sec { pointer-events: none; }
 
     /* ── Focus Time (58 px) ── */
     .ft { height: 58px; }
@@ -146,6 +161,21 @@
       transition: color .4s;
     }
     .ft.on .ft-label { color: #4ade80; }
+
+    /* ── Collapse button (14 px) ── */
+    .collapse-btn {
+      height: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      cursor: pointer;
+      -webkit-app-region: no-drag;
+      user-select: none;
+      color: var(--text-muted);
+      transition: color .15s, background .15s;
+    }
+    .collapse-btn:hover { color: var(--indigo); background: rgba(99,102,241,.07); }
 
   </style>
 </head>
@@ -192,13 +222,37 @@
       <span class="ft-label" id="ft-time">–</span>
     </div>
 
+    <div class="divider"></div>
+
+    <!-- Collapse -->
+    <div class="collapse-btn" id="collapse-btn" title="Collapse tab">
+      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="15 18 9 12 15 6"/>
+      </svg>
+    </div>
+
   </div>
 
   <script>
     const PORT = 8765;
+    const shell = document.querySelector('.shell');
+
+    // ── Thin mode (collapsed sliver) ──
+    window.electronAPI.onTabMode((mode) => {
+      shell.classList.toggle('thin', mode === 'thin');
+    });
+    shell.addEventListener('click', () => {
+      if (shell.classList.contains('thin')) window.electronAPI.restoreTab();
+    });
 
     // ── HUB ──
     document.getElementById('handle').addEventListener('click', () => window.electronAPI.toggle());
+
+    // Local calendar date (YYYY-MM-DD) — toISOString() would give the UTC date
+    function localDate(d = new Date()) {
+      const p = n => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    }
 
     // ── Recording ──
     const recBtn   = document.getElementById('rec-btn');
@@ -206,14 +260,35 @@
     let recActive = false;
     let recStart  = null;
     let recTimer  = null;
+    let recErrTimer = null;
+
+    // Server sends recording_start as epoch seconds (time.time()); accept ms / ISO too
+    function toDate(t) {
+      if (t == null) return null;
+      if (typeof t === 'number') return new Date(t < 1e12 ? t * 1000 : t);
+      return new Date(t);
+    }
+
+    function flashRecError(reason) {
+      clearTimeout(recErrTimer);
+      recBtn.classList.add('err');
+      recLabel.textContent = 'ERR';
+      recBtn.title = `Recording failed: ${reason || 'unknown error'}`;
+      recErrTimer = setTimeout(() => {
+        recBtn.classList.remove('err');
+        setRecState(recActive, recStart);
+      }, 4000);
+    }
 
     function setRecState(active, startTime) {
       recActive = active;
-      recStart  = startTime ? new Date(startTime) : null;
-      recBtn.classList.toggle('on', active);
-      recBtn.title = active ? 'Recording… click to stop' : 'Start recording';
+      recStart  = active ? (toDate(startTime) || recStart || new Date()) : null;
       clearInterval(recTimer);
       recTimer = null;
+      if (recBtn.classList.contains('err') && !active) return;   // let the error stay visible
+      recBtn.classList.remove('err');
+      recBtn.classList.toggle('on', active);
+      recBtn.title = active ? 'Recording… click to stop' : 'Start recording';
       if (!active) {
         recLabel.textContent = 'REC';
       } else {
@@ -230,19 +305,25 @@
     }
 
     recBtn.addEventListener('click', async () => {
+      // Endpoints answer 200 with {ok:false, reason} on failure — check the body, not res.ok
       try {
         if (recActive) {
-          await fetch(`http://127.0.0.1:${PORT}/api/record/stop`, { method: 'POST' });
-          setRecState(false);
+          const d = await (await fetch(`http://127.0.0.1:${PORT}/api/record/stop`, { method: 'POST' })).json();
+          if (d.ok || d.reason === 'not_recording') setRecState(false);
+          else flashRecError(d.reason);
         } else {
-          const res = await fetch(`http://127.0.0.1:${PORT}/api/record/start`, {
+          const d = await (await fetch(`http://127.0.0.1:${PORT}/api/record/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source: 'both', device_index: null }),
-          });
-          if (res.ok) setRecState(true, new Date().toISOString());
+          })).json();
+          if (d.ok) setRecState(true, Date.now());
+          else if (d.reason === 'already_recording') syncRec();
+          else flashRecError(d.reason);
         }
-      } catch {}
+      } catch {
+        flashRecError('app server not reachable');
+      }
     });
 
     async function syncRec() {
@@ -269,25 +350,50 @@
 
     jigBtn.addEventListener('click', async () => {
       try {
-        await fetch(`http://127.0.0.1:${PORT}/api/jiggler/${jigOn ? 'stop' : 'start'}`, { method: 'POST' });
-        setJigState(!jigOn);
+        const d = await (await fetch(`http://127.0.0.1:${PORT}/api/jiggler/${jigOn ? 'stop' : 'start'}`, { method: 'POST' })).json();
+        setJigState(!!d.running);
       } catch {}
     });
 
-    setInterval(async () => {
-      if (!jigOn) return;
+    // Poll in both states so a jiggler started/stopped from the panel shows up here too
+    async function syncJig() {
       try {
         const d = await (await fetch(`http://127.0.0.1:${PORT}/api/jiggler/status`)).json();
-        if (!d.running) setJigState(false);
+        setJigState(!!d.running);
       } catch {}
-    }, 5000);
+    }
+    setTimeout(syncJig, 2500);
+    setInterval(syncJig, 5000);
 
-    setTimeout(async () => {
-      try {
-        const d = await (await fetch(`http://127.0.0.1:${PORT}/api/jiggler/status`)).json();
-        setJigState(d.running);
-      } catch {}
-    }, 2500);
+    // ── Live events from the server (/ws/app) — instant REC / jiggler updates ──
+    // Polling above stays as a fallback while the socket is down.
+    function connectWS() {
+      let ws;
+      try { ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws/app`); }
+      catch { setTimeout(connectWS, 3000); return; }
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        switch (msg.type) {
+          case 'init':
+            setRecState(msg.recording, msg.recording_start);
+            syncJig();
+            break;
+          case 'recording_started':
+            setRecState(true, msg.start_time);
+            break;
+          case 'recording_stopped':
+            if (!msg.meta && msg.reason) flashRecError(msg.reason);
+            setRecState(false);
+            break;
+          case 'jiggler_stopped':
+            setJigState(false);
+            break;
+        }
+      };
+      ws.onclose = () => setTimeout(connectWS, 3000);
+    }
+    connectWS();
 
     // ── Focus dot (IPC) ──
     const focusDot = document.getElementById('focus-dot');
@@ -327,7 +433,7 @@
       const dot   = document.getElementById('ft-dot');
       const lbl   = document.getElementById('ft-time');
       try {
-        const today = new Date().toISOString().slice(0, 10);
+        const today = localDate();
         const [sR, cR] = await Promise.all([
           fetch(`http://127.0.0.1:${PORT}/api/work-sessions?date=${today}`),
           fetch(`http://127.0.0.1:${PORT}/api/work-sessions/current`),
@@ -352,6 +458,9 @@
     }
     setTimeout(syncFT, 3000);
     setInterval(syncFT, 30_000);
+
+    // ── Collapse button ──
+    document.getElementById('collapse-btn').addEventListener('click', () => window.electronAPI.collapseTab());
 
   </script>
 </body>

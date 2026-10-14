@@ -31,22 +31,39 @@ def _reset_session():
     _local.ns = None
 
 
-def get_events(days_ahead: int = 1) -> list[dict]:
+def get_events(days_ahead: int = 1, days_back: int = 0) -> list[dict]:
     from pywintypes import com_error
     try:
-        return _get_events(days_ahead)
+        return _get_events(days_ahead, days_back)
     except com_error:
         _reset_session()
         raise
 
 
-def _get_events(days_ahead: int) -> list[dict]:
+def get_events_between(start: datetime.datetime, end: datetime.datetime,
+                       body_chars: int = 500) -> list[dict]:
+    """Calendar events starting in [start, end). Used to look up a past meeting."""
+    from pywintypes import com_error
+    try:
+        return _get_events_between(start, end, body_chars)
+    except com_error:
+        _reset_session()
+        raise
+
+
+def _get_events(days_ahead: int, days_back: int = 0) -> list[dict]:
+    now   = datetime.datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return _get_events_between(
+        today - datetime.timedelta(days=days_back),
+        today + datetime.timedelta(days=days_ahead),
+    )
+
+
+def _get_events_between(start: datetime.datetime, end: datetime.datetime,
+                        body_chars: int = 500) -> list[dict]:
     outlook, ns = _get_session()
     calendar = ns.GetDefaultFolder(9)   # olFolderCalendar
-
-    now   = datetime.datetime.now()
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end   = start + datetime.timedelta(days=days_ahead)
 
     # Outlook COM Restrict date format must match the system locale's short date order.
     # On dd/MM/yyyy locales (e.g. Spanish) "9/3/2026" means March 9, not September 3.
@@ -79,7 +96,7 @@ def _get_events(days_ahead: int) -> list[dict]:
                 continue
             start_str = item_start_dt.strftime("%Y-%m-%dT%H:%M:%S")
             end_str   = str(item_end)[:19].replace(" ", "T")
-            body      = (item.Body or "")[:500]
+            body      = (item.Body or "")[:body_chars]
             events.append({
                 "subject":   item.Subject or "(No title)",
                 "start":     start_str,
@@ -87,6 +104,8 @@ def _get_events(days_ahead: int) -> list[dict]:
                 "location":  getattr(item, "Location", "") or "",
                 "organizer": getattr(item, "Organizer", "") or "",
                 "attendees": getattr(item, "RequiredAttendees", "") or "",
+                "optional_attendees": getattr(item, "OptionalAttendees", "") or "",
+                "categories": getattr(item, "Categories", "") or "",
                 "body":      body,
             })
         except Exception as exc:

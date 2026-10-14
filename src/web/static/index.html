@@ -44,12 +44,6 @@
         <span class="nav-label">Stats</span>
       </button>
 
-      <div class="nav-section">Assistant</div>
-      <button class="nav-btn" data-page="chat" onclick="showPage('chat')">
-        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
-        <span class="nav-label">AI Chat</span>
-      </button>
-
       <div class="nav-section">Tools</div>
       <button class="nav-btn" data-page="calendar" onclick="showPage('calendar')">
         <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></span>
@@ -63,6 +57,10 @@
       <button class="nav-btn" data-page="tools" onclick="showPage('tools')">
         <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg></span>
         <span class="nav-label">Tools & MCP</span>
+      </button>
+      <button class="nav-btn nav-quit" id="nav-quit-btn" onclick="quitApp()" style="display:none">
+        <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg></span>
+        <span class="nav-label">Quit</span>
       </button>
     </nav>
 
@@ -116,11 +114,13 @@
             <div class="rec-station-meta">
               <div class="rec-meta-field">
                 <label class="rec-meta-label" for="new-project">Project</label>
-                <input id="new-project" type="text" class="rec-meta-input" placeholder="Project name…" />
+                <input id="new-project" type="text" class="rec-meta-input" placeholder="Project name…"
+                       oninput="onPendingTagInput()" onchange="onPendingTagInput()" />
               </div>
               <div class="rec-meta-field">
                 <label class="rec-meta-label" for="new-meeting">Meeting</label>
-                <input id="new-meeting" type="text" class="rec-meta-input" placeholder="Meeting title…" list="meeting-suggestions" />
+                <input id="new-meeting" type="text" class="rec-meta-input" placeholder="Meeting title…" list="meeting-suggestions"
+                       oninput="onPendingTagInput()" onchange="onPendingTagInput()" />
                 <datalist id="meeting-suggestions"></datalist>
                 <div id="meeting-now-chip" class="meeting-now-chip" style="display:none"></div>
               </div>
@@ -196,8 +196,7 @@
                   <span id="rec-count" class="rec-count"></span>
                 </div>
                 <button class="import-btn" onclick="document.getElementById('import-file-input').click()" title="Import audio file">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="3"/><polyline points="5 10 12 3 19 10"/><line x1="5" y1="21" x2="19" y2="21"/></svg>
-                  Import
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="3"/><polyline points="5 10 12 3 19 10"/><line x1="5" y1="21" x2="19" y2="21"/></svg>
                 </button>
                 <input id="import-file-input" type="file" accept=".wav,.mp3,.m4a,.mp4,.ogg,.flac"
                        onchange="importFile(this)" />
@@ -211,24 +210,16 @@
                 <div id="project-bubbles"></div>
                 <button id="clear-filter-btn" class="clear-filter-btn" onclick="clearFilter()" style="display:none">✕ Clear</button>
               </div>
+              <div class="filter-row-bottom" id="filter-row-dates">
+                <span class="filter-label">Day</span>
+                <div id="date-bubbles"></div>
+              </div>
             </div>
             <div id="rec-list">
               <div class="empty-state"><p>Loading…</p></div>
             </div>
           </div>
 
-        </div>
-      </div>
-
-      <!-- ── Page: AI Chat ─────────────────────────────────── -->
-      <div id="page-chat" class="page" style="display:none">
-        <div id="chat-panel">
-          <div id="chat-messages"></div>
-          <div id="chat-input-row">
-            <textarea id="chat-input" placeholder="Ask about your recordings…"
-                      onkeydown="onChatKey(event)"></textarea>
-            <button id="chat-send" onclick="sendChatMessage()">Send</button>
-          </div>
         </div>
       </div>
 

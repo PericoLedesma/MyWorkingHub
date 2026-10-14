@@ -6,4 +6,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setFocusState:    (active)       => ipcRenderer.send('focus-state', active),
   onNavigate:       (cb)           => ipcRenderer.on('navigate', (_e, name) => cb(name)),
   showNotification: (title, body)  => ipcRenderer.send('show-notification', { title, body }),
+  quit:             ()             => ipcRenderer.send('quit'),
 });

@@ -30,12 +30,6 @@ def list_input_devices() -> list[tuple[int, str]]:
         pa.terminate()
 
 
-def _rms_level(chunk: np.ndarray) -> float:
-    """Return RMS amplitude of the chunk, scaled to [0, 1]."""
-    # scaled by 10 so typical speech sits in a visible range on the meter
-    return min(float(np.sqrt(np.mean(chunk ** 2))) * 10, 1.0)
-
-
 def _make_filepath() -> str:
     """Return a timestamped WAV filepath inside the recordings folder."""
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -142,10 +136,8 @@ def _merge_loopbacks(
 class Recorder:
     """Records audio from the microphone, WASAPI loopback, or both."""
 
-    def __init__(self, stop_event: threading.Event, set_mic_level, set_app_level, on_done):
+    def __init__(self, stop_event: threading.Event, on_done):
         self._stop = stop_event
-        self._set_mic_level = set_mic_level
-        self._set_app_level = set_app_level
         self._on_done = on_done  # signature: (meta | None, reason: str | None)
         self.mic_device_index: int | None = None
         # Live transcription buffers — drained periodically by LiveTranscriber
@@ -198,15 +190,40 @@ class Recorder:
             return None
 
     def _get_mic_device(self, pa: pyaudio.PyAudio) -> dict:
-        """Return mic device info; uses mic_device_index when set, otherwise auto-detects."""
+        """Return mic device info. Prefers WASAPI (shared mode) over MME/DirectSound.
+
+        pyaudiowpatch does not expose PaWasapiStreamInfo, but WASAPI shared mode is
+        PortAudio's default when the device's hostApi is WASAPI. Selecting the WASAPI
+        device index (rather than the MME alias for the same physical mic) is sufficient
+        to ensure shared-mode capture that coexists with Teams, Meet, etc.
+
+        Priority: WASAPI + preferred name > any WASAPI input > non-WASAPI preferred name
+        > system default. When mic_device_index is set explicitly, that device is used
+        as-is with no override.
+        """
         if self.mic_device_index is not None:
             return pa.get_device_info_by_index(self.mic_device_index)
-        count = pa.get_device_count()
-        for i in range(count):
+
+        try:
+            wasapi_idx = pa.get_host_api_info_by_type(pyaudio.paWASAPI)["index"]
+        except Exception:
+            wasapi_idx = -1
+
+        wasapi_any: dict | None = None   # any WASAPI non-loopback input (no name match)
+        legacy_match: dict | None = None  # non-WASAPI device with preferred name
+        for i in range(pa.get_device_count()):
             info = pa.get_device_info_by_index(i)
-            if info["maxInputChannels"] > 0 and "Microphone Array" in info["name"]:
-                return info
-        return pa.get_default_input_device_info()
+            if info["maxInputChannels"] <= 0 or info.get("isLoopbackDevice"):
+                continue
+            if info["hostApi"] == wasapi_idx:
+                if "Microphone Array" in info["name"]:
+                    return info  # optimal: WASAPI shared mode + preferred device name
+                if wasapi_any is None:
+                    wasapi_any = info
+            elif "Microphone Array" in info["name"] and legacy_match is None:
+                legacy_match = info
+
+        return wasapi_any or legacy_match or pa.get_default_input_device_info()
 
     def run_mic(self):
         """Record from the microphone until stop_event is set."""
@@ -231,8 +248,6 @@ class Recorder:
             chunks.append(chunk.copy())
             with self._live_lock:
                 self._live_chunks.append(chunk.copy())
-            self._set_mic_level(_rms_level(chunk))
-            self._set_app_level(0.0)
             return None, pyaudio.paContinue
 
         try:
@@ -288,7 +303,6 @@ class Recorder:
             return
 
         self._live_source = "app"
-        self._set_mic_level(0.0)
         start_time = datetime.datetime.now()
         filepath = _make_filepath()
 
@@ -308,7 +322,6 @@ class Recorder:
                     if feed:
                         with self._live_lock:
                             self._live_chunks.append(chunk.copy())
-                    self._set_app_level(_rms_level(chunk))
                     return None, pyaudio.paContinue
                 return cb
 
@@ -388,8 +401,6 @@ class Recorder:
         self._live_channels = 1
         self._live_source = "both"
         mic_chunks: list[np.ndarray] = []
-        mic_lv = [0.0]
-        app_lv = [0.0]
         start_time = datetime.datetime.now()
         filepath = _make_filepath()
 
@@ -398,8 +409,6 @@ class Recorder:
             mic_chunks.append(chunk.copy())
             with self._live_lock:
                 self._live_chunks.append(chunk.copy())
-            mic_lv[0] = _rms_level(chunk)
-            self._set_mic_level(mic_lv[0])
             return None, pyaudio.paContinue
 
         # Open one stream per loopback device; first feeds live app chunks
@@ -419,8 +428,6 @@ class Recorder:
                     if feed:
                         with self._live_app_lock:
                             self._live_app_chunks.append(chunk.copy())
-                    app_lv[0] = _rms_level(chunk)
-                    self._set_app_level(app_lv[0])
                     return None, pyaudio.paContinue
                 return cb
 
@@ -526,58 +533,3 @@ class Recorder:
             log.error("run_both save_metadata failed (WAV intact at %s): %s", filepath, e)
             self._on_done(None, "both_metadata_error")
 
-    def monitor(self, stop: threading.Event):
-        """Open mic + loopback streams for level monitoring only (no saving)."""
-        pa = pyaudio.PyAudio()
-        streams = []
-
-        try:
-            mic_info = self._get_mic_device(pa)
-            mic_rate = int(mic_info["defaultSampleRate"])
-
-            def mic_cb(in_data, _fc, _ti, _st):
-                chunk = np.frombuffer(in_data, dtype=np.float32)
-                self._set_mic_level(_rms_level(chunk))
-                return None, pyaudio.paContinue
-
-            streams.append(pa.open(
-                format=pyaudio.paFloat32, channels=1, rate=mic_rate,
-                input=True, input_device_index=mic_info["index"],
-                stream_callback=mic_cb,
-            ))
-        except Exception:
-            pass
-
-        device = self._get_loopback(pa)
-        if device:
-            try:
-                channels = device["maxInputChannels"]
-                rate = int(device["defaultSampleRate"])
-
-                def app_cb(in_data, _fc, _ti, _st):
-                    chunk = np.frombuffer(in_data, dtype=np.float32)
-                    self._set_app_level(_rms_level(chunk))
-                    return None, pyaudio.paContinue
-
-                streams.append(pa.open(
-                    format=pyaudio.paFloat32, channels=channels, rate=rate,
-                    input=True, input_device_index=device["index"],
-                    stream_callback=app_cb,
-                ))
-            except Exception:
-                pass
-
-        for s in streams:
-            s.start_stream()
-
-        stop.wait()
-
-        for s in streams:
-            try:
-                s.stop_stream()
-                s.close()
-            except Exception:
-                pass
-        pa.terminate()
-        self._set_mic_level(0.0)
-        self._set_app_level(0.0)
